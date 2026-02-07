@@ -2,6 +2,8 @@
 
 A 2D animation application built with the [Nightshade](https://github.com/matthewjberger/nightshade) engine. Runs natively on desktop and in the browser via WebGPU.
 
+<img width="2560" height="1392" alt="image" src="https://github.com/user-attachments/assets/62e8deff-56da-4ec4-b14c-a6c77445fac7" />
+
 ## Features
 
 - **Drawing Tools**: Rectangle, Ellipse, Line, Pen (bezier curves), and Pencil (freehand drawing with Douglas-Peucker simplification)
@@ -43,6 +45,8 @@ just run-wasm
 | `Space` | Play / Pause |
 | `F6` | Insert keyframe |
 | `F7` | Insert blank keyframe |
+| `Left` | Previous frame |
+| `Right` | Next frame |
 | `Ctrl+Z` | Undo |
 | `Ctrl+Shift+Z` | Redo |
 | `Ctrl+A` | Select all |
