@@ -1080,6 +1080,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "framekey"
+version = "0.1.0"
+dependencies = [
+ "nightshade",
+ "serde",
+ "serde_json",
+ "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
 name = "freecs"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2237,18 +2249,6 @@ dependencies = [
  "wgpu",
  "wgpu-hal",
  "winit",
-]
-
-[[package]]
-name = "nightshade-animate"
-version = "0.1.0"
-dependencies = [
- "nightshade",
- "serde",
- "serde_json",
- "uuid",
- "wasm-bindgen",
- "wasm-bindgen-futures",
 ]
 
 [[package]]

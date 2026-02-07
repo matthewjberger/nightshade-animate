@@ -20,18 +20,18 @@ mod tools;
 mod tween;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    launch(NightshadeAnimate::default())?;
+    launch(FrameKey::default())?;
     Ok(())
 }
 
 #[derive(Default)]
-struct NightshadeAnimate {
+struct FrameKey {
     app: app::AnimateApp,
 }
 
-impl State for NightshadeAnimate {
+impl State for FrameKey {
     fn title(&self) -> &str {
-        "Nightshade Animate"
+        "FrameKey"
     }
 
     fn initialize(&mut self, world: &mut World) {

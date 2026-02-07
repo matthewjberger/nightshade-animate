@@ -53,6 +53,8 @@ fn draw_layer_panel(app: &mut AnimateApp, ui: &mut egui::Ui) {
             .id_salt("layer_scroll")
             .show(ui, |ui| {
                 let mut layer_action = None;
+                let mut visibility_toggle = None;
+                let mut lock_toggle = None;
 
                 for layer_index in 0..app.project.layers.len() {
                     let is_active = layer_index == app.active_layer;
@@ -67,38 +69,64 @@ fn draw_layer_panel(app: &mut AnimateApp, ui: &mut egui::Ui) {
                         egui::Sense::click(),
                     );
 
-                    if response.clicked() {
-                        layer_action = Some(layer_index);
+                    let eye_rect = egui::Rect::from_min_size(
+                        rect.min + egui::vec2(2.0, 2.0),
+                        egui::vec2(20.0, 20.0),
+                    );
+                    let lock_rect = egui::Rect::from_min_size(
+                        rect.min + egui::vec2(24.0, 2.0),
+                        egui::vec2(20.0, 20.0),
+                    );
+
+                    if response.clicked()
+                        && let Some(pos) = response.interact_pointer_pos()
+                    {
+                        if eye_rect.contains(pos) {
+                            visibility_toggle = Some(layer_index);
+                        } else if lock_rect.contains(pos) {
+                            lock_toggle = Some(layer_index);
+                        } else {
+                            layer_action = Some(layer_index);
+                        }
                     }
 
                     ui.painter().rect_filled(rect, 2.0, bg_color);
 
                     let layer = &app.project.layers[layer_index];
+                    let pointer_pos = ui.ctx().input(|input| input.pointer.hover_pos());
 
-                    let eye_rect = egui::Rect::from_min_size(
-                        rect.min + egui::vec2(2.0, 2.0),
-                        egui::vec2(20.0, 20.0),
-                    );
+                    let eye_hovered = pointer_pos.is_some_and(|pos| eye_rect.contains(pos));
                     let eye_text = if layer.visible { "V" } else { "-" };
+                    let eye_color = if eye_hovered {
+                        egui::Color32::from_rgb(255, 220, 100)
+                    } else if layer.visible {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_rgb(80, 80, 80)
+                    };
                     ui.painter().text(
                         eye_rect.center(),
                         egui::Align2::CENTER_CENTER,
                         eye_text,
                         egui::FontId::monospace(10.0),
-                        egui::Color32::WHITE,
+                        eye_color,
                     );
 
-                    let lock_rect = egui::Rect::from_min_size(
-                        rect.min + egui::vec2(24.0, 2.0),
-                        egui::vec2(20.0, 20.0),
-                    );
+                    let lock_hovered = pointer_pos.is_some_and(|pos| lock_rect.contains(pos));
                     let lock_text = if layer.locked { "L" } else { "-" };
+                    let lock_color = if lock_hovered {
+                        egui::Color32::from_rgb(255, 220, 100)
+                    } else if layer.locked {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_rgb(80, 80, 80)
+                    };
                     ui.painter().text(
                         lock_rect.center(),
                         egui::Align2::CENTER_CENTER,
                         lock_text,
                         egui::FontId::monospace(10.0),
-                        egui::Color32::WHITE,
+                        lock_color,
                     );
 
                     let name_pos = rect.min + egui::vec2(48.0, FRAME_CELL_HEIGHT / 2.0);
@@ -113,6 +141,14 @@ fn draw_layer_panel(app: &mut AnimateApp, ui: &mut egui::Ui) {
 
                 if let Some(index) = layer_action {
                     app.active_layer = index;
+                }
+                if let Some(index) = visibility_toggle {
+                    app.history.push(app.project.clone());
+                    app.project.layers[index].visible = !app.project.layers[index].visible;
+                }
+                if let Some(index) = lock_toggle {
+                    app.history.push(app.project.clone());
+                    app.project.layers[index].locked = !app.project.layers[index].locked;
                 }
             });
     });
@@ -291,6 +327,19 @@ fn draw_frame_grid(app: &mut AnimateApp, ui: &mut egui::Ui) {
                             }
                         }
 
+                        if app.project.layers[layer_index]
+                            .keyframes
+                            .contains_key(&app.current_frame)
+                            && app.project.layers[layer_index].keyframes.len() > 1
+                            && ui.button("Delete Keyframe").clicked()
+                        {
+                            app.history.push(app.project.clone());
+                            app.project.layers[layer_index]
+                                .keyframes
+                                .remove(&app.current_frame);
+                            ui.close();
+                        }
+
                         ui.separator();
 
                         let mut toggle_visible = is_visible;
@@ -315,8 +364,11 @@ pub fn handle_timeline_shortcuts(app: &mut AnimateApp, ui_context: &egui::Contex
         return;
     }
     ui_context.input(|input| {
-        if input.key_pressed(egui::Key::F6) {
+        if !input.modifiers.shift && input.key_pressed(egui::Key::F6) {
             insert_keyframe(app);
+        }
+        if input.modifiers.shift && input.key_pressed(egui::Key::F6) {
+            delete_keyframe(app);
         }
         if input.key_pressed(egui::Key::F7) {
             insert_blank_keyframe(app);
@@ -362,4 +414,20 @@ pub fn insert_blank_keyframe(app: &mut AnimateApp) {
     layer
         .keyframes
         .insert(app.current_frame, Keyframe::default());
+}
+
+pub fn delete_keyframe(app: &mut AnimateApp) {
+    if app.active_layer >= app.project.layers.len() {
+        return;
+    }
+
+    let layer = &app.project.layers[app.active_layer];
+    if !layer.keyframes.contains_key(&app.current_frame) || layer.keyframes.len() <= 1 {
+        return;
+    }
+
+    app.history.push(app.project.clone());
+    app.project.layers[app.active_layer]
+        .keyframes
+        .remove(&app.current_frame);
 }

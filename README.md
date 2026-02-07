@@ -1,4 +1,4 @@
-# Nightshade Animate
+# FrameKey
 
 A 2D animation application built with the [Nightshade](https://github.com/matthewjberger/nightshade) engine. Runs natively on desktop and in the browser via WebGPU.
 
@@ -45,6 +45,7 @@ just run-wasm
 | `Space` | Play / Pause |
 | `F6` | Insert keyframe |
 | `F7` | Insert blank keyframe |
+| `Shift+F6` | Delete keyframe |
 | `Left` | Previous frame |
 | `Right` | Next frame |
 | `Ctrl+Z` | Undo |

@@ -132,6 +132,10 @@ pub fn draw_menu_bar(app: &mut AnimateApp, ui_context: &egui::Context) {
                     timeline::insert_blank_keyframe(app);
                     ui.close();
                 }
+                if ui.button("Delete Keyframe (Shift+F6)").clicked() {
+                    timeline::delete_keyframe(app);
+                    ui.close();
+                }
                 ui.separator();
                 if ui.button("Generate Test Animation").clicked() {
                     app.history.push(app.project.clone());
