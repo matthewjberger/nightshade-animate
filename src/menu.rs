@@ -63,6 +63,17 @@ pub fn draw_menu_bar(app: &mut AnimateApp, ui_context: &egui::Context) {
                         }
                         ui.close();
                     }
+                    if ui.button("Export GIF...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("GIF Image", &["gif"])
+                            .set_file_name("animation.gif")
+                            .set_title("Export GIF")
+                            .save_file()
+                        {
+                            crate::export::export_gif(&app.project, &path);
+                        }
+                        ui.close();
+                    }
                     if ui.button("Export Sprite Sheet...").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
                             .add_filter("PNG Image", &["png"])
