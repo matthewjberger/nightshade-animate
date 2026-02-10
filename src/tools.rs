@@ -2,16 +2,24 @@ use nightshade::prelude::*;
 
 use crate::app::AnimateApp;
 use crate::canvas::CanvasView;
-use crate::project::{AnimObject, PathPoint, Shape};
+use crate::project::{AnimObject, FontFamily, PathPoint, Shape};
+use crate::selection;
+use crate::tween;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Tool {
     Select,
+    NodeEdit,
     Rectangle,
     Ellipse,
     Line,
     Pen,
     Pencil,
+    Eraser,
+    PaintBucket,
+    Text,
+    Brush,
+    Bone,
 }
 
 #[derive(Clone)]
@@ -29,6 +37,12 @@ pub enum ToolState {
     },
     PencilDrawing {
         points: Vec<[f32; 2]>,
+    },
+    Erasing {
+        points: Vec<[f32; 2]>,
+    },
+    BrushDrawing {
+        points: Vec<PathPoint>,
     },
 }
 
@@ -52,6 +66,24 @@ pub fn handle_drawing_tool(
         }
         Tool::Pencil => {
             handle_pencil_tool(app, response, ui_context);
+        }
+        Tool::Eraser => {
+            handle_eraser_tool(app, response, ui_context);
+        }
+        Tool::PaintBucket => {
+            handle_paint_bucket_tool(app, response);
+        }
+        Tool::NodeEdit => {
+            crate::node_edit::handle_node_edit_tool(app, response, ui_context);
+        }
+        Tool::Text => {
+            handle_text_tool(app, response);
+        }
+        Tool::Brush => {
+            handle_brush_tool(app, response, ui_context);
+        }
+        Tool::Bone => {
+            crate::armature::handle_bone_tool(app, response, ui_context);
         }
         Tool::Select => {}
     }
@@ -127,8 +159,8 @@ fn handle_shape_tool(app: &mut AnimateApp, response: &egui::Response, ui_context
                 let object = AnimObject::new(
                     shape,
                     position,
-                    app.fill_color,
-                    app.stroke_color,
+                    app.fill_paint.clone(),
+                    app.stroke_paint.clone(),
                     app.stroke_width,
                 );
 
@@ -163,6 +195,7 @@ fn handle_pen_tool(app: &mut AnimateApp, response: &egui::Response, ui_context: 
                         control_out: point
                             .control_out
                             .map(|control| [control[0] - min_x, control[1] - min_y]),
+                        pressure: point.pressure,
                     })
                     .collect();
 
@@ -174,8 +207,8 @@ fn handle_pen_tool(app: &mut AnimateApp, response: &egui::Response, ui_context: 
                 let object = AnimObject::new(
                     shape,
                     [min_x, min_y],
-                    app.fill_color,
-                    app.stroke_color,
+                    app.fill_paint.clone(),
+                    app.stroke_paint.clone(),
                     app.stroke_width,
                 );
 
@@ -196,6 +229,7 @@ fn handle_pen_tool(app: &mut AnimateApp, response: &egui::Response, ui_context: 
                     position: [canvas_pos.x, canvas_pos.y],
                     control_in: None,
                     control_out: None,
+                    pressure: 1.0,
                 };
                 app.tool_state = ToolState::PenDrawing {
                     points: vec![point],
@@ -231,6 +265,7 @@ fn handle_pen_tool(app: &mut AnimateApp, response: &egui::Response, ui_context: 
                         ]
                     }),
                     control_out: None,
+                    pressure: 1.0,
                 };
                 points.push(point);
                 app.tool_state = ToolState::PenDrawing {
@@ -256,6 +291,7 @@ fn handle_pen_tool(app: &mut AnimateApp, response: &egui::Response, ui_context: 
                         ]
                     }),
                     control_out: None,
+                    pressure: 1.0,
                 };
                 points.push(point);
                 app.tool_state = ToolState::PenDrawing {
@@ -303,7 +339,10 @@ fn handle_pen_tool(app: &mut AnimateApp, response: &egui::Response, ui_context: 
                 last_control_out,
             };
         }
-        ToolState::Drawing { .. } | ToolState::PencilDrawing { .. } => {}
+        ToolState::Drawing { .. }
+        | ToolState::PencilDrawing { .. }
+        | ToolState::Erasing { .. }
+        | ToolState::BrushDrawing { .. } => {}
     }
 }
 
@@ -351,6 +390,7 @@ fn handle_pencil_tool(app: &mut AnimateApp, response: &egui::Response, ui_contex
                         position: [point[0] - min_x, point[1] - min_y],
                         control_in: None,
                         control_out: None,
+                        pressure: 1.0,
                     })
                     .collect();
 
@@ -362,8 +402,213 @@ fn handle_pencil_tool(app: &mut AnimateApp, response: &egui::Response, ui_contex
                 let object = AnimObject::new(
                     shape,
                     [min_x, min_y],
-                    app.fill_color,
-                    app.stroke_color,
+                    app.fill_paint.clone(),
+                    app.stroke_paint.clone(),
+                    app.stroke_width,
+                );
+
+                insert_object_at_current_frame(app, object);
+            }
+
+            app.tool_state = ToolState::Idle;
+        }
+    }
+}
+
+fn handle_eraser_tool(app: &mut AnimateApp, response: &egui::Response, ui_context: &egui::Context) {
+    if response.drag_started_by(egui::PointerButton::Primary)
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        let canvas_pos = app.canvas_view.screen_to_canvas(pos);
+        app.tool_state = ToolState::Erasing {
+            points: vec![[canvas_pos.x, canvas_pos.y]],
+        };
+        app.history.push(app.project.clone());
+    }
+
+    if let ToolState::Erasing { ref mut points } = app.tool_state {
+        if let Some(pos) = ui_context.input(|input| input.pointer.latest_pos()) {
+            let canvas_pos = app.canvas_view.screen_to_canvas(pos);
+            let new_point = [canvas_pos.x, canvas_pos.y];
+            if let Some(last) = points.last() {
+                let dx = new_point[0] - last[0];
+                let dy = new_point[1] - last[1];
+                if dx * dx + dy * dy > 4.0 {
+                    points.push(new_point);
+                }
+            }
+
+            let mut objects_to_delete = Vec::new();
+            for layer in &app.project.layers {
+                if !layer.visible || layer.locked {
+                    continue;
+                }
+                if let Some(objects) = tween::resolve_frame(layer, app.current_frame) {
+                    for object in &objects {
+                        if selection::point_in_object_public(
+                            egui::pos2(canvas_pos.x, canvas_pos.y),
+                            object,
+                        ) {
+                            objects_to_delete.push(object.id);
+                        }
+                    }
+                }
+            }
+
+            if !objects_to_delete.is_empty() {
+                for layer in &mut app.project.layers {
+                    let has_match = tween::resolve_frame(layer, app.current_frame)
+                        .map(|objects| {
+                            objects
+                                .iter()
+                                .any(|object| objects_to_delete.contains(&object.id))
+                        })
+                        .unwrap_or(false);
+
+                    if has_match {
+                        tween::ensure_keyframe_at(layer, app.current_frame);
+                    }
+
+                    if let Some(keyframe) = layer.keyframes.get_mut(&app.current_frame) {
+                        keyframe
+                            .objects
+                            .retain(|object| !objects_to_delete.contains(&object.id));
+                    }
+                }
+            }
+        }
+
+        if response.drag_stopped() {
+            app.tool_state = ToolState::Idle;
+        }
+    }
+}
+
+fn handle_paint_bucket_tool(app: &mut AnimateApp, response: &egui::Response) {
+    if response.clicked_by(egui::PointerButton::Primary)
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        let canvas_pos = app.canvas_view.screen_to_canvas(pos);
+        let hit_id = selection::hit_test_public(app, canvas_pos);
+
+        if let Some(object_id) = hit_id {
+            app.history.push(app.project.clone());
+            let fill = app.fill_paint.clone();
+            for layer in &mut app.project.layers {
+                let has_match = tween::resolve_frame(layer, app.current_frame)
+                    .map(|objects| objects.iter().any(|object| object.id == object_id))
+                    .unwrap_or(false);
+
+                if has_match {
+                    tween::ensure_keyframe_at(layer, app.current_frame);
+                }
+
+                if let Some(keyframe) = layer.keyframes.get_mut(&app.current_frame) {
+                    for object in &mut keyframe.objects {
+                        if object.id == object_id {
+                            object.fill = fill.clone();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn handle_text_tool(app: &mut AnimateApp, response: &egui::Response) {
+    if response.clicked_by(egui::PointerButton::Primary)
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        let canvas_pos = app.canvas_view.screen_to_canvas(pos);
+
+        let shape = Shape::Text {
+            content: "Text".to_string(),
+            font_size: 24.0,
+            font_family: FontFamily::SansSerif,
+        };
+
+        let object = AnimObject::new(
+            shape,
+            [canvas_pos.x, canvas_pos.y],
+            app.fill_paint.clone(),
+            app.stroke_paint.clone(),
+            0.0,
+        );
+
+        let object_id = object.id;
+        insert_object_at_current_frame(app, object);
+        app.selection.selected_objects = vec![object_id];
+    }
+}
+
+fn handle_brush_tool(app: &mut AnimateApp, response: &egui::Response, ui_context: &egui::Context) {
+    if response.drag_started_by(egui::PointerButton::Primary)
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        let canvas_pos = app.canvas_view.screen_to_canvas(pos);
+        app.tool_state = ToolState::BrushDrawing {
+            points: vec![PathPoint {
+                position: [canvas_pos.x, canvas_pos.y],
+                control_in: None,
+                control_out: None,
+                pressure: 1.0,
+            }],
+        };
+    }
+
+    if let ToolState::BrushDrawing { ref mut points } = app.tool_state {
+        if response.dragged_by(egui::PointerButton::Primary)
+            && let Some(pos) = ui_context.input(|input| input.pointer.latest_pos())
+        {
+            let canvas_pos = app.canvas_view.screen_to_canvas(pos);
+            let new_position = [canvas_pos.x, canvas_pos.y];
+            if let Some(last) = points.last() {
+                let dx = new_position[0] - last.position[0];
+                let dy = new_position[1] - last.position[1];
+                let dist = (dx * dx + dy * dy).sqrt();
+                if dist > 2.0 {
+                    let pressure = (1.0 / (1.0 + dist * 0.05)).clamp(0.1, 1.0);
+                    points.push(PathPoint {
+                        position: new_position,
+                        control_in: None,
+                        control_out: None,
+                        pressure,
+                    });
+                }
+            }
+        }
+
+        if response.drag_stopped() {
+            if points.len() >= 2 {
+                let min_x = points
+                    .iter()
+                    .map(|point| point.position[0])
+                    .fold(f32::INFINITY, f32::min);
+                let min_y = points
+                    .iter()
+                    .map(|point| point.position[1])
+                    .fold(f32::INFINITY, f32::min);
+
+                let path_points: Vec<PathPoint> = points
+                    .iter()
+                    .map(|point| PathPoint {
+                        position: [point.position[0] - min_x, point.position[1] - min_y],
+                        control_in: None,
+                        control_out: None,
+                        pressure: point.pressure,
+                    })
+                    .collect();
+
+                let shape = Shape::Path {
+                    points: path_points,
+                    closed: false,
+                };
+
+                let object = AnimObject::new(
+                    shape,
+                    [min_x, min_y],
+                    app.fill_paint.clone(),
+                    app.stroke_paint.clone(),
                     app.stroke_width,
                 );
 
@@ -418,18 +663,20 @@ fn douglas_peucker(points: &[[f32; 2]], epsilon: f32) -> Vec<[f32; 2]> {
 }
 
 pub fn draw_tool_preview(app: &AnimateApp, view: &CanvasView, painter: &egui::Painter) {
+    let fill_color = app.fill_paint.as_solid();
+    let stroke_color = app.stroke_paint.as_solid();
     let fill = egui::Color32::from_rgba_unmultiplied(
-        (app.fill_color[0] * 255.0) as u8,
-        (app.fill_color[1] * 255.0) as u8,
-        (app.fill_color[2] * 255.0) as u8,
+        (fill_color[0] * 255.0) as u8,
+        (fill_color[1] * 255.0) as u8,
+        (fill_color[2] * 255.0) as u8,
         100,
     );
     let stroke = egui::Stroke::new(
         app.stroke_width * view.zoom,
         egui::Color32::from_rgba_unmultiplied(
-            (app.stroke_color[0] * 255.0) as u8,
-            (app.stroke_color[1] * 255.0) as u8,
-            (app.stroke_color[2] * 255.0) as u8,
+            (stroke_color[0] * 255.0) as u8,
+            (stroke_color[1] * 255.0) as u8,
+            (stroke_color[2] * 255.0) as u8,
             180,
         ),
     );
@@ -530,12 +777,13 @@ pub fn draw_tool_preview(app: &AnimateApp, view: &CanvasView, painter: &egui::Pa
         }
         ToolState::PencilDrawing { points } => {
             if points.len() >= 2 {
+                let pencil_stroke_color = app.stroke_paint.as_solid();
                 let pencil_stroke = egui::Stroke::new(
                     app.stroke_width * view.zoom,
                     egui::Color32::from_rgba_unmultiplied(
-                        (app.stroke_color[0] * 255.0) as u8,
-                        (app.stroke_color[1] * 255.0) as u8,
-                        (app.stroke_color[2] * 255.0) as u8,
+                        (pencil_stroke_color[0] * 255.0) as u8,
+                        (pencil_stroke_color[1] * 255.0) as u8,
+                        (pencil_stroke_color[2] * 255.0) as u8,
                         128,
                     ),
                 );
@@ -550,6 +798,49 @@ pub fn draw_tool_preview(app: &AnimateApp, view: &CanvasView, painter: &egui::Pa
                         points[segment_index][1],
                     ));
                     painter.line_segment([from, to], pencil_stroke);
+                }
+            }
+        }
+        ToolState::Erasing { points } => {
+            if points.len() >= 2 {
+                let eraser_stroke = egui::Stroke::new(3.0, egui::Color32::from_rgb(255, 80, 80));
+                for segment_index in 1..points.len() {
+                    let from = view.canvas_to_screen(egui::pos2(
+                        points[segment_index - 1][0],
+                        points[segment_index - 1][1],
+                    ));
+                    let to = view.canvas_to_screen(egui::pos2(
+                        points[segment_index][0],
+                        points[segment_index][1],
+                    ));
+                    painter.line_segment([from, to], eraser_stroke);
+                }
+            }
+        }
+        ToolState::BrushDrawing { points } => {
+            if points.len() >= 2 {
+                let stroke_c = app.stroke_paint.as_solid();
+                let base_width = app.stroke_width * view.zoom;
+                for index in 1..points.len() {
+                    let prev = &points[index - 1];
+                    let curr = &points[index];
+                    let from =
+                        view.canvas_to_screen(egui::pos2(prev.position[0], prev.position[1]));
+                    let to = view.canvas_to_screen(egui::pos2(curr.position[0], curr.position[1]));
+                    let avg_pressure = (prev.pressure + curr.pressure) / 2.0;
+                    let width = base_width * avg_pressure;
+                    painter.line_segment(
+                        [from, to],
+                        egui::Stroke::new(
+                            width,
+                            egui::Color32::from_rgba_unmultiplied(
+                                (stroke_c[0] * 255.0) as u8,
+                                (stroke_c[1] * 255.0) as u8,
+                                (stroke_c[2] * 255.0) as u8,
+                                128,
+                            ),
+                        ),
+                    );
                 }
             }
         }

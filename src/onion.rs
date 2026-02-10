@@ -2,6 +2,7 @@ use nightshade::prelude::*;
 
 use crate::app::AnimateApp;
 use crate::canvas::{CanvasView, render_object};
+use crate::paint::Paint;
 use crate::tween;
 
 pub struct OnionSkinning {
@@ -60,19 +61,21 @@ fn draw_ghost_frame(
         if let Some(objects) = tween::resolve_frame(layer, frame) {
             for object in &objects {
                 let mut tinted = object.clone();
-                tinted.fill = [
-                    tint[0] * object.fill[0],
-                    tint[1] * object.fill[1],
-                    tint[2] * object.fill[2],
+                let original_fill = object.fill.as_solid();
+                let original_stroke = object.stroke.as_solid();
+                tinted.fill = Paint::Solid([
+                    tint[0] * original_fill[0],
+                    tint[1] * original_fill[1],
+                    tint[2] * original_fill[2],
                     tint[3],
-                ];
-                tinted.stroke = [
-                    tint[0] * object.stroke[0],
-                    tint[1] * object.stroke[1],
-                    tint[2] * object.stroke[2],
+                ]);
+                tinted.stroke = Paint::Solid([
+                    tint[0] * original_stroke[0],
+                    tint[1] * original_stroke[1],
+                    tint[2] * original_stroke[2],
                     tint[3],
-                ];
-                render_object(&tinted, view, painter, layer.opacity);
+                ]);
+                render_object(&tinted, view, painter, layer.opacity, None);
             }
         }
     }

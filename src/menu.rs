@@ -1,12 +1,16 @@
 use nightshade::prelude::*;
 
+use crate::align;
 use crate::app::AnimateApp;
+use crate::boolean;
+use crate::clipboard;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::io;
 use crate::playback;
 use crate::project::Project;
 use crate::timeline;
 use crate::tween;
+use crate::z_order;
 
 pub fn draw_menu_bar(app: &mut AnimateApp, ui_context: &egui::Context) {
     egui::TopBottomPanel::top("menu_bar").show(ui_context, |ui| {
@@ -85,6 +89,95 @@ pub fn draw_menu_bar(app: &mut AnimateApp, ui_context: &egui::Context) {
                         }
                         ui.close();
                     }
+                    if ui.button("Export MP4...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("MP4 Video", &["mp4"])
+                            .set_file_name("animation.mp4")
+                            .set_title("Export MP4")
+                            .save_file()
+                            && let Err(error) = crate::export::export_video(
+                                &app.project,
+                                &path,
+                                crate::export::VideoFormat::Mp4,
+                            )
+                        {
+                            eprintln!("MP4 export failed: {}", error);
+                        }
+                        ui.close();
+                    }
+                    if ui.button("Export WebM...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("WebM Video", &["webm"])
+                            .set_file_name("animation.webm")
+                            .set_title("Export WebM")
+                            .save_file()
+                            && let Err(error) = crate::export::export_video(
+                                &app.project,
+                                &path,
+                                crate::export::VideoFormat::WebM,
+                            )
+                        {
+                            eprintln!("WebM export failed: {}", error);
+                        }
+                        ui.close();
+                    }
+                    if ui.button("Export Lottie JSON...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Lottie JSON", &["json"])
+                            .set_file_name("animation.json")
+                            .set_title("Export Lottie")
+                            .save_file()
+                        {
+                            crate::lottie::export_lottie(&app.project, &path);
+                        }
+                        ui.close();
+                    }
+                    if ui.button("Export SVG...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("SVG Image", &["svg"])
+                            .set_file_name("frame.svg")
+                            .set_title("Export SVG")
+                            .save_file()
+                        {
+                            crate::svg::export_svg(&app.project, app.current_frame, &path);
+                        }
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Import Image...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "gif", "tga"])
+                            .set_title("Import Image")
+                            .pick_file()
+                        {
+                            import_image(app, &path);
+                        }
+                        ui.close();
+                    }
+                    if ui.button("Import Audio...").clicked() {
+                        crate::audio::import_audio(app);
+                        ui.close();
+                    }
+                    if ui.button("Import SVG...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("SVG Files", &["svg"])
+                            .set_title("Import SVG")
+                            .pick_file()
+                        {
+                            app.history.push(app.project.clone());
+                            tween::ensure_keyframe_at(
+                                &mut app.project.layers[app.active_layer],
+                                app.current_frame,
+                            );
+                            crate::svg::import_svg(
+                                &mut app.project,
+                                &path,
+                                app.active_layer,
+                                app.current_frame,
+                            );
+                        }
+                        ui.close();
+                    }
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -117,6 +210,92 @@ pub fn draw_menu_bar(app: &mut AnimateApp, ui_context: &egui::Context) {
                     delete_selected(app);
                     ui.close();
                 }
+                ui.separator();
+                ui.menu_button("Arrange", |ui| {
+                    if ui.button("Bring to Front (Ctrl+Shift+])").clicked() {
+                        z_order::bring_to_front(app);
+                        ui.close();
+                    }
+                    if ui.button("Bring Forward (Ctrl+])").clicked() {
+                        z_order::bring_forward(app);
+                        ui.close();
+                    }
+                    if ui.button("Send Backward (Ctrl+[)").clicked() {
+                        z_order::send_backward(app);
+                        ui.close();
+                    }
+                    if ui.button("Send to Back (Ctrl+Shift+[)").clicked() {
+                        z_order::send_to_back(app);
+                        ui.close();
+                    }
+                });
+                ui.menu_button("Boolean", |ui| {
+                    let has_two = app.selection.selected_objects.len() == 2;
+                    if ui
+                        .add_enabled(has_two, egui::Button::new("Union"))
+                        .clicked()
+                    {
+                        boolean::apply_boolean_operation(app, boolean::BooleanOp::Union);
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(has_two, egui::Button::new("Subtract"))
+                        .clicked()
+                    {
+                        boolean::apply_boolean_operation(app, boolean::BooleanOp::Subtract);
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(has_two, egui::Button::new("Intersect"))
+                        .clicked()
+                    {
+                        boolean::apply_boolean_operation(app, boolean::BooleanOp::Intersect);
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(has_two, egui::Button::new("Exclude"))
+                        .clicked()
+                    {
+                        boolean::apply_boolean_operation(app, boolean::BooleanOp::Exclude);
+                        ui.close();
+                    }
+                });
+                ui.menu_button("Align", |ui| {
+                    if ui.button("Align Left").clicked() {
+                        align::align_left(app);
+                        ui.close();
+                    }
+                    if ui.button("Align Center Horizontal").clicked() {
+                        align::align_center_horizontal(app);
+                        ui.close();
+                    }
+                    if ui.button("Align Right").clicked() {
+                        align::align_right(app);
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Align Top").clicked() {
+                        align::align_top(app);
+                        ui.close();
+                    }
+                    if ui.button("Align Center Vertical").clicked() {
+                        align::align_center_vertical(app);
+                        ui.close();
+                    }
+                    if ui.button("Align Bottom").clicked() {
+                        align::align_bottom(app);
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Distribute Horizontal").clicked() {
+                        align::distribute_horizontal(app);
+                        ui.close();
+                    }
+                    if ui.button("Distribute Vertical").clicked() {
+                        align::distribute_vertical(app);
+                        ui.close();
+                    }
+                });
             });
             ui.menu_button("View", |ui| {
                 let onion_label = if app.onion.enabled {
@@ -131,6 +310,39 @@ pub fn draw_menu_bar(app: &mut AnimateApp, ui_context: &egui::Context) {
                 if ui.button("Reset Zoom").clicked() {
                     app.canvas_view.zoom = 0.5;
                     app.canvas_view.pan = egui::Vec2::ZERO;
+                    ui.close();
+                }
+                ui.separator();
+                let snap_grid_label = if app.snap_to_grid {
+                    "Snap to Grid [ON]"
+                } else {
+                    "Snap to Grid [OFF]"
+                };
+                if ui.button(snap_grid_label).clicked() {
+                    app.snap_to_grid = !app.snap_to_grid;
+                    ui.close();
+                }
+                let snap_objects_label = if app.snap_to_objects {
+                    "Snap to Objects [ON]"
+                } else {
+                    "Snap to Objects [OFF]"
+                };
+                if ui.button(snap_objects_label).clicked() {
+                    app.snap_to_objects = !app.snap_to_objects;
+                    ui.close();
+                }
+                let snap_guides_label = if app.snap_to_guides {
+                    "Snap to Guides [ON]"
+                } else {
+                    "Snap to Guides [OFF]"
+                };
+                if ui.button(snap_guides_label).clicked() {
+                    app.snap_to_guides = !app.snap_to_guides;
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Clear All Guides").clicked() {
+                    app.project.guides.clear();
                     ui.close();
                 }
             });
@@ -201,6 +413,75 @@ fn save_as(app: &mut AnimateApp) {
         let _ = io::save_project(&app.project, &path);
         app.save_path = Some(path);
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn import_image(app: &mut AnimateApp, path: &std::path::Path) {
+    let Ok(dynamic_image) = image::open(path) else {
+        return;
+    };
+    let rgba = dynamic_image.to_rgba8();
+    let (source_width, source_height) = rgba.dimensions();
+
+    let mut png_bytes = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(std::io::Cursor::new(&mut png_bytes));
+    if image::ImageEncoder::write_image(
+        encoder,
+        rgba.as_raw(),
+        source_width,
+        source_height,
+        image::ExtendedColorType::Rgba8,
+    )
+    .is_err()
+    {
+        return;
+    }
+
+    let asset_id = uuid::Uuid::new_v4();
+    let name = path
+        .file_name()
+        .map(|os_str| os_str.to_string_lossy().to_string())
+        .unwrap_or_else(|| "image".to_string());
+
+    app.history.push(app.project.clone());
+
+    app.project.image_assets.push(crate::project::ImageAsset {
+        id: asset_id,
+        name,
+        data: png_bytes,
+        width: source_width,
+        height: source_height,
+    });
+
+    tween::ensure_keyframe_at(&mut app.project.layers[app.active_layer], app.current_frame);
+
+    let object = crate::project::AnimObject::new(
+        crate::project::Shape::RasterImage {
+            image_id: asset_id,
+            source_width,
+            source_height,
+            display_width: source_width as f32,
+            display_height: source_height as f32,
+        },
+        [
+            app.project.canvas_width as f32 / 2.0,
+            app.project.canvas_height as f32 / 2.0,
+        ],
+        crate::paint::Paint::Solid([1.0, 1.0, 1.0, 1.0]),
+        crate::paint::Paint::Solid([0.0, 0.0, 0.0, 0.0]),
+        0.0,
+    );
+
+    let object_id = object.id;
+    if let Some(keyframe) = app.project.layers[app.active_layer]
+        .keyframes
+        .get_mut(&app.current_frame)
+    {
+        keyframe.objects.push(object);
+    }
+
+    app.selection.selected_objects.clear();
+    app.selection.selected_objects.push(object_id);
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -369,8 +650,60 @@ pub fn handle_global_shortcuts(app: &mut AnimateApp, ui_context: &egui::Context)
         if input.key_pressed(egui::Key::Delete) {
             delete_selected(app);
         }
+        if input.modifiers.ctrl && input.key_pressed(egui::Key::C) {
+            clipboard::copy_selected(app);
+        }
+        if input.modifiers.ctrl && input.key_pressed(egui::Key::V) {
+            clipboard::paste(app);
+        }
+        if input.modifiers.ctrl && input.key_pressed(egui::Key::X) {
+            clipboard::cut_selected(app);
+        }
+        if input.modifiers.ctrl && input.key_pressed(egui::Key::D) {
+            clipboard::duplicate_selected(app);
+        }
         if input.key_pressed(egui::Key::O) && !input.modifiers.ctrl {
             app.onion.enabled = !app.onion.enabled;
+        }
+        if input.key_pressed(egui::Key::Plus) || input.key_pressed(egui::Key::Equals) {
+            app.canvas_view.zoom = (app.canvas_view.zoom * 1.25).clamp(0.05, 10.0);
+        }
+        if input.key_pressed(egui::Key::Minus) {
+            app.canvas_view.zoom = (app.canvas_view.zoom / 1.25).clamp(0.05, 10.0);
+        }
+        if input.key_pressed(egui::Key::Num0) && !input.modifiers.ctrl {
+            let scale_x = app.canvas_view.panel_rect.width() / app.project.canvas_width as f32;
+            let scale_y = app.canvas_view.panel_rect.height() / app.project.canvas_height as f32;
+            app.canvas_view.zoom = scale_x.min(scale_y) * 0.9;
+            app.canvas_view.pan = egui::Vec2::ZERO;
+        }
+        if input.key_pressed(egui::Key::Num0) && input.modifiers.ctrl {
+            app.canvas_view.zoom = 1.0;
+            app.canvas_view.pan = egui::Vec2::ZERO;
+        }
+        if input.modifiers.ctrl
+            && input.modifiers.shift
+            && input.key_pressed(egui::Key::CloseBracket)
+        {
+            z_order::bring_to_front(app);
+        }
+        if input.modifiers.ctrl
+            && !input.modifiers.shift
+            && input.key_pressed(egui::Key::CloseBracket)
+        {
+            z_order::bring_forward(app);
+        }
+        if input.modifiers.ctrl
+            && !input.modifiers.shift
+            && input.key_pressed(egui::Key::OpenBracket)
+        {
+            z_order::send_backward(app);
+        }
+        if input.modifiers.ctrl
+            && input.modifiers.shift
+            && input.key_pressed(egui::Key::OpenBracket)
+        {
+            z_order::send_to_back(app);
         }
         #[cfg(not(target_arch = "wasm32"))]
         {

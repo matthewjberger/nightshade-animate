@@ -1,11 +1,22 @@
+use std::collections::HashMap;
+
 use nightshade::prelude::*;
 
 use crate::app::AnimateApp;
+use crate::armature;
+use crate::clipboard;
+use crate::guides;
+use crate::library;
+use crate::menu;
+use crate::node_edit;
 use crate::onion;
-use crate::project::{AnimObject, Shape};
+use crate::paint::Paint;
+use crate::project::{AnimObject, LayerType, Shape};
 use crate::selection;
 use crate::tools;
+use crate::transform;
 use crate::tween;
+use crate::z_order;
 
 #[derive(Clone)]
 pub struct CanvasView {
@@ -47,6 +58,9 @@ impl CanvasView {
 }
 
 pub fn draw_canvas(app: &mut AnimateApp, ui_context: &egui::Context) {
+    #[cfg(not(target_arch = "wasm32"))]
+    ensure_image_textures(app, ui_context);
+
     egui::CentralPanel::default().show(ui_context, |ui| {
         let panel_rect = ui.available_rect_before_wrap();
         app.canvas_view.panel_rect = panel_rect;
@@ -65,21 +79,98 @@ pub fn draw_canvas(app: &mut AnimateApp, ui_context: &egui::Context) {
         draw_frame_objects(app, &clipped_painter);
 
         selection::draw_selection_indicators(app, &app.canvas_view.clone(), &clipped_painter);
+        transform::draw_transform_handles(app, &app.canvas_view.clone(), &clipped_painter);
+        node_edit::draw_node_edit_overlay(app, &app.canvas_view.clone(), &clipped_painter);
+
+        armature::draw_bone_overlay(app, &app.canvas_view.clone(), &clipped_painter);
 
         tools::draw_tool_preview(app, &app.canvas_view.clone(), &clipped_painter);
+
+        guides::draw_rulers_and_guides(app, &app.canvas_view.clone(), &clipped_painter);
 
         handle_pan_zoom(app, &response, ui_context);
 
         match app.tool {
             crate::tools::Tool::Select => {
-                selection::handle_select_tool(app, &response, ui_context);
+                let handled = transform::handle_transform_interaction(app, &response, ui_context);
+                if !handled {
+                    selection::handle_select_tool(app, &response, ui_context);
+                }
             }
             _ => {
                 tools::handle_drawing_tool(app, &response, ui_context);
             }
         }
 
+        guides::handle_ruler_interaction(app, ui_context);
+
+        draw_context_menu(app, &response);
+
         ui.ctx().request_repaint();
+    });
+}
+
+fn draw_context_menu(app: &mut AnimateApp, response: &egui::Response) {
+    response.context_menu(|ui| {
+        if !app.selection.selected_objects.is_empty() {
+            if ui.button("Cut (Ctrl+X)").clicked() {
+                clipboard::cut_selected(app);
+                ui.close();
+            }
+            if ui.button("Copy (Ctrl+C)").clicked() {
+                clipboard::copy_selected(app);
+                ui.close();
+            }
+        }
+        if !app.clipboard.objects.is_empty() && ui.button("Paste (Ctrl+V)").clicked() {
+            clipboard::paste(app);
+            ui.close();
+        }
+        if !app.selection.selected_objects.is_empty() {
+            if ui.button("Duplicate (Ctrl+D)").clicked() {
+                clipboard::duplicate_selected(app);
+                ui.close();
+            }
+            ui.separator();
+            ui.menu_button("Arrange", |ui| {
+                if ui.button("Bring to Front").clicked() {
+                    z_order::bring_to_front(app);
+                    ui.close();
+                }
+                if ui.button("Bring Forward").clicked() {
+                    z_order::bring_forward(app);
+                    ui.close();
+                }
+                if ui.button("Send Backward").clicked() {
+                    z_order::send_backward(app);
+                    ui.close();
+                }
+                if ui.button("Send to Back").clicked() {
+                    z_order::send_to_back(app);
+                    ui.close();
+                }
+            });
+            ui.separator();
+            if ui.button("Convert to Symbol").clicked() {
+                library::convert_selection_to_symbol(app);
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("Delete").clicked() {
+                menu::delete_selected(app);
+                ui.close();
+            }
+        }
+        if app.selection.selected_objects.is_empty() {
+            if !app.clipboard.objects.is_empty() && ui.button("Paste (Ctrl+V)").clicked() {
+                clipboard::paste(app);
+                ui.close();
+            }
+            if ui.button("Select All (Ctrl+A)").clicked() {
+                menu::select_all(app);
+                ui.close();
+            }
+        }
     });
 }
 
@@ -133,19 +224,102 @@ fn draw_canvas_background(app: &AnimateApp, painter: &egui::Painter) {
     );
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn ensure_image_textures(app: &mut AnimateApp, ui_context: &egui::Context) {
+    for asset in &app.project.image_assets {
+        if app.image_textures.contains_key(&asset.id) {
+            continue;
+        }
+        let Ok(dynamic_image) = image::load_from_memory(&asset.data) else {
+            continue;
+        };
+        let rgba = dynamic_image.to_rgba8();
+        let (tex_width, tex_height) = rgba.dimensions();
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+            [tex_width as usize, tex_height as usize],
+            rgba.as_raw(),
+        );
+        let handle = ui_context.load_texture(
+            format!("img_{}", asset.id),
+            color_image,
+            egui::TextureOptions::LINEAR,
+        );
+        app.image_textures.insert(asset.id, handle);
+    }
+}
+
 fn draw_frame_objects(app: &AnimateApp, painter: &egui::Painter) {
+    #[cfg(not(target_arch = "wasm32"))]
+    let textures = &app.image_textures;
+    #[cfg(target_arch = "wasm32")]
+    let textures: HashMap<uuid::Uuid, egui::TextureHandle> = HashMap::new();
+    #[cfg(target_arch = "wasm32")]
+    let textures = &textures;
+
     for layer_index in (0..app.project.layers.len()).rev() {
         let layer = &app.project.layers[layer_index];
         if !layer.visible {
             continue;
         }
+        if layer.layer_type == LayerType::Folder {
+            continue;
+        }
 
         if let Some(objects) = tween::resolve_frame(layer, app.current_frame) {
             for object in &objects {
-                render_object(object, &app.canvas_view, painter, layer.opacity);
+                if layer.layer_type == LayerType::Guide {
+                    render_object(
+                        object,
+                        &app.canvas_view,
+                        painter,
+                        layer.opacity * 0.5,
+                        Some(textures),
+                    );
+                    draw_guide_indicator(object, &app.canvas_view, painter);
+                } else {
+                    render_object(
+                        object,
+                        &app.canvas_view,
+                        painter,
+                        layer.opacity,
+                        Some(textures),
+                    );
+                }
             }
         }
     }
+
+    render_symbol_instances(app, painter, textures);
+}
+
+fn draw_guide_indicator(object: &AnimObject, view: &CanvasView, painter: &egui::Painter) {
+    let (half_w, half_h, offset) = selection::get_object_bounds_public(object);
+    let center_x = object.position[0] + offset[0];
+    let center_y = object.position[1] + offset[1];
+
+    let screen_min = view.canvas_to_screen(egui::pos2(center_x - half_w, center_y - half_h));
+    let screen_max = view.canvas_to_screen(egui::pos2(center_x + half_w, center_y + half_h));
+    let rect = egui::Rect::from_two_pos(screen_min, screen_max);
+
+    let green_fill = egui::Color32::from_rgba_unmultiplied(0, 200, 100, 40);
+    let green_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 200, 100));
+    painter.rect(
+        rect,
+        0.0,
+        green_fill,
+        green_stroke,
+        egui::StrokeKind::Outside,
+    );
+}
+
+fn paint_to_color32(paint: &Paint, opacity: f32) -> egui::Color32 {
+    let color = paint.as_solid();
+    egui::Color32::from_rgba_unmultiplied(
+        (color[0] * 255.0) as u8,
+        (color[1] * 255.0) as u8,
+        (color[2] * 255.0) as u8,
+        (color[3] * opacity * 255.0) as u8,
+    )
 }
 
 pub fn render_object(
@@ -153,9 +327,10 @@ pub fn render_object(
     view: &CanvasView,
     painter: &egui::Painter,
     layer_opacity: f32,
+    image_textures: Option<&HashMap<uuid::Uuid, egui::TextureHandle>>,
 ) {
-    let fill = color_with_opacity(object.fill, layer_opacity);
-    let stroke_color = color_with_opacity(object.stroke, layer_opacity);
+    let fill = paint_to_color32(&object.fill, layer_opacity);
+    let stroke_color = paint_to_color32(&object.stroke, layer_opacity);
     let stroke = egui::Stroke::new(object.stroke_width * view.zoom, stroke_color);
 
     let pos = egui::pos2(object.position[0], object.position[1]);
@@ -251,6 +426,15 @@ pub fn render_object(
                 return;
             }
 
+            let has_variable_pressure = points
+                .iter()
+                .any(|point| (point.pressure - 1.0).abs() > 0.01);
+
+            if has_variable_pressure && !*closed {
+                render_variable_width_path(object, points, view, painter, layer_opacity);
+                return;
+            }
+
             let mut screen_points = Vec::new();
             for path_point_index in 0..points.len() {
                 let point = &points[path_point_index];
@@ -310,16 +494,143 @@ pub fn render_object(
                 painter.add(path_shape);
             }
         }
+        Shape::Text {
+            content, font_size, ..
+        } => {
+            let screen_font_size = font_size * view.zoom * object.scale[1];
+            let text_color = paint_to_color32(&object.fill, layer_opacity);
+            painter.text(
+                screen_pos,
+                egui::Align2::LEFT_TOP,
+                content,
+                egui::FontId::proportional(screen_font_size),
+                text_color,
+            );
+        }
+        Shape::RasterImage {
+            image_id,
+            display_width,
+            display_height,
+            ..
+        } => {
+            if let Some(textures) = image_textures
+                && let Some(handle) = textures.get(image_id)
+            {
+                let half_w = display_width * object.scale[0] / 2.0;
+                let half_h = display_height * object.scale[1] / 2.0;
+                let screen_min = view.canvas_to_screen(egui::pos2(
+                    object.position[0] - half_w,
+                    object.position[1] - half_h,
+                ));
+                let screen_max = view.canvas_to_screen(egui::pos2(
+                    object.position[0] + half_w,
+                    object.position[1] + half_h,
+                ));
+                let rect = egui::Rect::from_two_pos(screen_min, screen_max);
+                let tint = egui::Color32::from_rgba_unmultiplied(
+                    255,
+                    255,
+                    255,
+                    (layer_opacity * 255.0) as u8,
+                );
+                painter.image(
+                    handle.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    tint,
+                );
+            }
+        }
+        Shape::SymbolInstance { .. } => {}
     }
 }
 
-fn color_with_opacity(color: [f32; 4], opacity: f32) -> egui::Color32 {
-    egui::Color32::from_rgba_unmultiplied(
-        (color[0] * 255.0) as u8,
-        (color[1] * 255.0) as u8,
-        (color[2] * 255.0) as u8,
-        (color[3] * opacity * 255.0) as u8,
-    )
+pub fn render_symbol_instances(
+    app: &AnimateApp,
+    painter: &egui::Painter,
+    image_textures: &HashMap<uuid::Uuid, egui::TextureHandle>,
+) {
+    for layer_index in (0..app.project.layers.len()).rev() {
+        let layer = &app.project.layers[layer_index];
+        if !layer.visible || layer.layer_type == LayerType::Folder {
+            continue;
+        }
+
+        if let Some(objects) = tween::resolve_frame(layer, app.current_frame) {
+            for object in &objects {
+                if let Shape::SymbolInstance { symbol_id } = &object.shape
+                    && let Some(symbol) = app
+                        .project
+                        .library
+                        .symbols
+                        .iter()
+                        .find(|symbol| symbol.id == *symbol_id)
+                {
+                    for symbol_layer in symbol.layers.iter().rev() {
+                        if !symbol_layer.visible {
+                            continue;
+                        }
+                        if let Some(symbol_objects) = tween::resolve_frame(symbol_layer, 0) {
+                            for symbol_object in &symbol_objects {
+                                let mut transformed = symbol_object.clone();
+                                let cos_r = object.rotation.cos();
+                                let sin_r = object.rotation.sin();
+                                let local_x = symbol_object.position[0] * object.scale[0];
+                                let local_y = symbol_object.position[1] * object.scale[1];
+                                transformed.position[0] =
+                                    object.position[0] + local_x * cos_r - local_y * sin_r;
+                                transformed.position[1] =
+                                    object.position[1] + local_x * sin_r + local_y * cos_r;
+                                transformed.rotation += object.rotation;
+                                transformed.scale[0] *= object.scale[0];
+                                transformed.scale[1] *= object.scale[1];
+                                render_object(
+                                    &transformed,
+                                    &app.canvas_view,
+                                    painter,
+                                    layer.opacity,
+                                    Some(image_textures),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn render_variable_width_path(
+    object: &AnimObject,
+    points: &[crate::project::PathPoint],
+    view: &CanvasView,
+    painter: &egui::Painter,
+    layer_opacity: f32,
+) {
+    let stroke_color = paint_to_color32(&object.stroke, layer_opacity);
+    let base_width = object.stroke_width * view.zoom;
+
+    for index in 1..points.len() {
+        let prev = &points[index - 1];
+        let curr = &points[index];
+
+        let prev_screen = view.canvas_to_screen(egui::pos2(
+            object.position[0] + prev.position[0] * object.scale[0],
+            object.position[1] + prev.position[1] * object.scale[1],
+        ));
+        let curr_screen = view.canvas_to_screen(egui::pos2(
+            object.position[0] + curr.position[0] * object.scale[0],
+            object.position[1] + curr.position[1] * object.scale[1],
+        ));
+
+        let avg_pressure = (prev.pressure + curr.pressure) / 2.0;
+        let width = (base_width * avg_pressure).max(0.5);
+
+        painter.line_segment(
+            [prev_screen, curr_screen],
+            egui::Stroke::new(width, stroke_color),
+        );
+    }
 }
 
 fn cubic_bezier(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2], t: f32) -> [f32; 2] {

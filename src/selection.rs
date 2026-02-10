@@ -2,7 +2,10 @@ use nightshade::prelude::*;
 
 use crate::app::AnimateApp;
 use crate::canvas::CanvasView;
+use crate::node_edit::NodeEditState;
 use crate::project::{AnimObject, Shape};
+use crate::snapping;
+use crate::transform::TransformState;
 use crate::tween;
 
 #[derive(Clone, Default)]
@@ -10,6 +13,13 @@ pub struct Selection {
     pub selected_objects: Vec<uuid::Uuid>,
     pub drag_start: Option<egui::Pos2>,
     pub drag_offset: Option<egui::Vec2>,
+    pub marquee_start: Option<egui::Pos2>,
+    pub marquee_current: Option<egui::Pos2>,
+    pub transform_state: TransformState,
+    pub node_edit: NodeEditState,
+    pub guide_dragging: Option<usize>,
+    pub snap_line_x: Option<f32>,
+    pub snap_line_y: Option<f32>,
 }
 
 pub fn handle_select_tool(
@@ -18,6 +28,7 @@ pub fn handle_select_tool(
     ui_context: &egui::Context,
 ) {
     if response.clicked_by(egui::PointerButton::Primary)
+        && app.selection.marquee_start.is_none()
         && let Some(pos) = response.interact_pointer_pos()
     {
         let canvas_pos = app.canvas_view.screen_to_canvas(pos);
@@ -47,29 +58,104 @@ pub fn handle_select_tool(
             }
             app.selection.drag_start = Some(canvas_pos);
             app.selection.drag_offset = Some(egui::Vec2::ZERO);
+            app.selection.marquee_start = None;
 
             app.history.push(app.project.clone());
+        } else {
+            app.selection.marquee_start = Some(canvas_pos);
+            app.selection.marquee_current = Some(canvas_pos);
+            app.selection.drag_start = None;
         }
     }
 
-    if response.dragged_by(egui::PointerButton::Primary)
-        && app.selection.drag_start.is_some()
-        && let Some(start) = app.selection.drag_start
-        && let Some(pos) = ui_context.input(|input| input.pointer.latest_pos())
-    {
-        let canvas_pos = app.canvas_view.screen_to_canvas(pos);
-        let delta = canvas_pos - start;
-        let prev_offset = app.selection.drag_offset.unwrap_or(egui::Vec2::ZERO);
-        let movement = delta - prev_offset;
+    if response.dragged_by(egui::PointerButton::Primary) {
+        if app.selection.drag_start.is_some()
+            && let Some(start) = app.selection.drag_start
+            && let Some(pos) = ui_context.input(|input| input.pointer.latest_pos())
+        {
+            let canvas_pos = app.canvas_view.screen_to_canvas(pos);
+            let raw_target = [canvas_pos.x, canvas_pos.y];
+            let selected_clone = app.selection.selected_objects.clone();
+            let snap_result = snapping::snap_point(app, raw_target, &selected_clone);
+            let snapped_pos = egui::pos2(snap_result.position[0], snap_result.position[1]);
+            let delta = snapped_pos - start;
+            let prev_offset = app.selection.drag_offset.unwrap_or(egui::Vec2::ZERO);
+            let movement = delta - prev_offset;
 
-        move_selected_objects(app, movement);
-        app.selection.drag_offset = Some(delta);
+            move_selected_objects(app, movement);
+            app.selection.drag_offset = Some(delta);
+            app.selection.snap_line_x = snap_result.snap_line_x;
+            app.selection.snap_line_y = snap_result.snap_line_y;
+        }
+
+        if app.selection.marquee_start.is_some()
+            && let Some(pos) = ui_context.input(|input| input.pointer.latest_pos())
+        {
+            let canvas_pos = app.canvas_view.screen_to_canvas(pos);
+            app.selection.marquee_current = Some(canvas_pos);
+        }
     }
 
     if response.drag_stopped() {
+        if let (Some(marquee_start), Some(marquee_end)) =
+            (app.selection.marquee_start, app.selection.marquee_current)
+        {
+            let min_x = marquee_start.x.min(marquee_end.x);
+            let min_y = marquee_start.y.min(marquee_end.y);
+            let max_x = marquee_start.x.max(marquee_end.x);
+            let max_y = marquee_start.y.max(marquee_end.y);
+
+            if (max_x - min_x) > 2.0 || (max_y - min_y) > 2.0 {
+                let ctrl = ui_context.input(|input| input.modifiers.ctrl);
+                if !ctrl {
+                    app.selection.selected_objects.clear();
+                }
+
+                for layer in &app.project.layers {
+                    if !layer.visible || layer.locked {
+                        continue;
+                    }
+                    if let Some(objects) = tween::resolve_frame(layer, app.current_frame) {
+                        for object in &objects {
+                            let (half_w, half_h, center_offset) = get_object_bounds(object);
+                            let obj_min_x = object.position[0] + center_offset[0] - half_w;
+                            let obj_min_y = object.position[1] + center_offset[1] - half_h;
+                            let obj_max_x = object.position[0] + center_offset[0] + half_w;
+                            let obj_max_y = object.position[1] + center_offset[1] + half_h;
+
+                            let intersects = obj_min_x <= max_x
+                                && obj_max_x >= min_x
+                                && obj_min_y <= max_y
+                                && obj_max_y >= min_y;
+
+                            if intersects && !app.selection.selected_objects.contains(&object.id) {
+                                app.selection.selected_objects.push(object.id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         app.selection.drag_start = None;
         app.selection.drag_offset = None;
+        app.selection.marquee_start = None;
+        app.selection.marquee_current = None;
+        app.selection.snap_line_x = None;
+        app.selection.snap_line_y = None;
     }
+}
+
+pub fn hit_test_public(app: &AnimateApp, canvas_pos: egui::Pos2) -> Option<uuid::Uuid> {
+    hit_test(app, canvas_pos)
+}
+
+pub fn point_in_object_public(point: egui::Pos2, object: &AnimObject) -> bool {
+    point_in_object(point, object)
+}
+
+pub fn get_object_bounds_public(object: &AnimObject) -> (f32, f32, [f32; 2]) {
+    get_object_bounds(object)
 }
 
 fn hit_test(app: &AnimateApp, canvas_pos: egui::Pos2) -> Option<uuid::Uuid> {
@@ -157,6 +243,26 @@ fn point_in_object(point: egui::Pos2, object: &AnimObject) -> bool {
             }
             false
         }
+        Shape::Text {
+            content, font_size, ..
+        } => {
+            let approx_width = content.len() as f32 * font_size * 0.5 * object.scale[0];
+            let approx_height = font_size * object.scale[1];
+            unrotated_x >= 0.0
+                && unrotated_x <= approx_width
+                && unrotated_y >= 0.0
+                && unrotated_y <= approx_height
+        }
+        Shape::RasterImage {
+            display_width,
+            display_height,
+            ..
+        } => {
+            let half_w = display_width * object.scale[0] / 2.0;
+            let half_h = display_height * object.scale[1] / 2.0;
+            unrotated_x.abs() <= half_w && unrotated_y.abs() <= half_h
+        }
+        Shape::SymbolInstance { .. } => unrotated_x.abs() <= 20.0 && unrotated_y.abs() <= 20.0,
     }
 }
 
@@ -188,6 +294,34 @@ fn move_selected_objects(app: &mut AnimateApp, delta: egui::Vec2) {
 }
 
 pub fn draw_selection_indicators(app: &AnimateApp, view: &CanvasView, painter: &egui::Painter) {
+    if let (Some(start), Some(current)) =
+        (app.selection.marquee_start, app.selection.marquee_current)
+    {
+        let screen_start = view.canvas_to_screen(start);
+        let screen_current = view.canvas_to_screen(current);
+        let marquee_rect = egui::Rect::from_two_pos(screen_start, screen_current);
+        painter.rect(
+            marquee_rect,
+            0.0,
+            egui::Color32::from_rgba_unmultiplied(0, 120, 255, 30),
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 150, 255)),
+            egui::StrokeKind::Outside,
+        );
+    }
+
+    let snap_color = egui::Color32::from_rgb(255, 100, 200);
+    let snap_stroke = egui::Stroke::new(1.0, snap_color);
+    if let Some(snap_x) = app.selection.snap_line_x {
+        let top = view.canvas_to_screen(egui::pos2(snap_x, 0.0));
+        let bottom = view.canvas_to_screen(egui::pos2(snap_x, app.project.canvas_height as f32));
+        painter.line_segment([top, bottom], snap_stroke);
+    }
+    if let Some(snap_y) = app.selection.snap_line_y {
+        let left = view.canvas_to_screen(egui::pos2(0.0, snap_y));
+        let right = view.canvas_to_screen(egui::pos2(app.project.canvas_width as f32, snap_y));
+        painter.line_segment([left, right], snap_stroke);
+    }
+
     if app.selection.selected_objects.is_empty() {
         return;
     }
@@ -301,5 +435,24 @@ fn get_object_bounds(object: &AnimObject) -> (f32, f32, [f32; 2]) {
             let half_h = ((max_y - min_y) / 2.0).max(5.0);
             (half_w, half_h, [center_x, center_y])
         }
+        Shape::Text {
+            content, font_size, ..
+        } => {
+            let approx_width = content.len() as f32 * font_size * 0.5 * object.scale[0];
+            let approx_height = font_size * object.scale[1];
+            let half_w = approx_width / 2.0;
+            let half_h = approx_height / 2.0;
+            (half_w.max(5.0), half_h.max(5.0), [half_w, half_h])
+        }
+        Shape::RasterImage {
+            display_width,
+            display_height,
+            ..
+        } => (
+            display_width * object.scale[0] / 2.0,
+            display_height * object.scale[1] / 2.0,
+            [0.0, 0.0],
+        ),
+        Shape::SymbolInstance { .. } => (20.0, 20.0, [0.0, 0.0]),
     }
 }

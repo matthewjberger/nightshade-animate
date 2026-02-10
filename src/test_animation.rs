@@ -1,6 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
-use crate::project::{AnimObject, Keyframe, Layer, PathPoint, Project, Shape, TweenType};
+use crate::paint::Paint;
+use crate::project::{
+    AnimObject, BlendMode, Keyframe, Layer, LayerType, Library, PathPoint, Project, Shape,
+    TweenType,
+};
 
 pub fn generate_bouncing_ball() -> Project {
     let ball_id = uuid::Uuid::new_v4();
@@ -20,8 +24,8 @@ pub fn generate_bouncing_ball() -> Project {
 
     let shadow_y = ground_y + ball_radius + 10.0;
 
-    let ball_fill = [0.95, 0.3, 0.15, 1.0];
-    let ball_stroke = [0.7, 0.15, 0.05, 1.0];
+    let ball_fill = Paint::Solid([0.95, 0.3, 0.15, 1.0]);
+    let ball_stroke = Paint::Solid([0.7, 0.15, 0.05, 1.0]);
     let ball_stroke_width = 2.0f32;
 
     let mut bounce_heights = Vec::new();
@@ -114,8 +118,8 @@ pub fn generate_bouncing_ball() -> Project {
             position: [center_x, data.ball_y],
             rotation: 0.0,
             scale: data.ball_scale,
-            fill: ball_fill,
-            stroke: ball_stroke,
+            fill: ball_fill.clone(),
+            stroke: ball_stroke.clone(),
             stroke_width: ball_stroke_width,
         };
 
@@ -124,6 +128,9 @@ pub fn generate_bouncing_ball() -> Project {
             Keyframe {
                 objects: vec![ball],
                 tween: data.tween,
+                label: String::new(),
+                comment: String::new(),
+                shape_tween: false,
             },
         );
     }
@@ -143,8 +150,8 @@ pub fn generate_bouncing_ball() -> Project {
             position: [center_x, shadow_y],
             rotation: 0.0,
             scale: [shadow_scale_x, 1.0],
-            fill: [0.0, 0.0, 0.0, shadow_opacity],
-            stroke: [0.0, 0.0, 0.0, 0.0],
+            fill: Paint::Solid([0.0, 0.0, 0.0, shadow_opacity]),
+            stroke: Paint::Solid([0.0, 0.0, 0.0, 0.0]),
             stroke_width: 0.0,
         };
 
@@ -153,6 +160,9 @@ pub fn generate_bouncing_ball() -> Project {
             Keyframe {
                 objects: vec![shadow],
                 tween: data.tween,
+                label: String::new(),
+                comment: String::new(),
+                shape_tween: false,
             },
         );
     }
@@ -164,6 +174,11 @@ pub fn generate_bouncing_ball() -> Project {
         locked: false,
         opacity: 1.0,
         keyframes: shadow_keyframes,
+        layer_type: LayerType::Normal,
+        blend_mode: BlendMode::Normal,
+        parent_id: None,
+        collapsed: false,
+        property_tracks: HashMap::new(),
     };
 
     let ball_layer = Layer {
@@ -173,6 +188,11 @@ pub fn generate_bouncing_ball() -> Project {
         locked: false,
         opacity: 1.0,
         keyframes: ball_keyframes,
+        layer_type: LayerType::Normal,
+        blend_mode: BlendMode::Normal,
+        parent_id: None,
+        collapsed: false,
+        property_tracks: HashMap::new(),
     };
 
     Project {
@@ -183,6 +203,17 @@ pub fn generate_bouncing_ball() -> Project {
         frame_rate,
         total_frames,
         layers: vec![ball_layer, shadow_layer],
+        guides: Vec::new(),
+        camera_keyframes: BTreeMap::new(),
+        camera_tween: TweenType::None,
+        scenes: Vec::new(),
+        active_scene: 0,
+        library: Library::default(),
+        image_assets: Vec::new(),
+        loop_start: None,
+        loop_end: None,
+        audio_tracks: Vec::new(),
+        armatures: Vec::new(),
     }
 }
 
@@ -434,11 +465,14 @@ pub fn generate_showcase_animation() -> Project {
                     position: [0.0, 830.0],
                     rotation: 0.0,
                     scale: [1.0, 1.0],
-                    fill: [0.0; 4],
-                    stroke,
+                    fill: Paint::Solid([0.0; 4]),
+                    stroke: Paint::Solid(stroke),
                     stroke_width,
                 }],
                 tween,
+                label: String::new(),
+                comment: String::new(),
+                shape_tween: false,
             },
         );
     }
@@ -449,16 +483,19 @@ pub fn generate_showcase_animation() -> Project {
                 position: [0.0, 0.0],
                 control_in: Some([-20.0, 5.0]),
                 control_out: Some([20.0, -5.0]),
+                pressure: 1.0,
             },
             PathPoint {
                 position: [200.0, -50.0],
                 control_in: Some([180.0, -30.0]),
                 control_out: Some([220.0, -70.0]),
+                pressure: 1.0,
             },
             PathPoint {
                 position: [200.0, 50.0],
                 control_in: Some([220.0, 70.0]),
                 control_out: Some([180.0, 30.0]),
+                pressure: 1.0,
             },
         ],
         closed: true,
@@ -488,8 +525,8 @@ pub fn generate_showcase_animation() -> Project {
                         position: [300.0, 835.0],
                         rotation: 0.0,
                         scale: [1.0, 1.0],
-                        fill: [0.65, 0.6, 0.55, 1.0],
-                        stroke: [0.4, 0.35, 0.3, 0.8],
+                        fill: Paint::Solid([0.65, 0.6, 0.55, 1.0]),
+                        stroke: Paint::Solid([0.4, 0.35, 0.3, 0.8]),
                         stroke_width: 1.5,
                     },
                     AnimObject {
@@ -502,8 +539,8 @@ pub fn generate_showcase_animation() -> Project {
                         position: [300.0, 770.0],
                         rotation: tower_rotation,
                         scale: [1.0, 1.0],
-                        fill: [0.85, 0.82, 0.75, 1.0],
-                        stroke: [0.5, 0.2, 0.15, 0.8],
+                        fill: Paint::Solid([0.85, 0.82, 0.75, 1.0]),
+                        stroke: Paint::Solid([0.5, 0.2, 0.15, 0.8]),
                         stroke_width: 2.0,
                     },
                     AnimObject {
@@ -512,8 +549,8 @@ pub fn generate_showcase_animation() -> Project {
                         position: [312.0, 702.0],
                         rotation: 0.0,
                         scale: [1.0, 1.0],
-                        fill: [1.0, 0.95, 0.6, light_alpha * 0.85],
-                        stroke: [0.0; 4],
+                        fill: Paint::Solid([1.0, 0.95, 0.6, light_alpha * 0.85]),
+                        stroke: Paint::Solid([0.0; 4]),
                         stroke_width: 0.0,
                     },
                     AnimObject {
@@ -526,8 +563,8 @@ pub fn generate_showcase_animation() -> Project {
                         position: [300.0, 702.0],
                         rotation: tower_rotation,
                         scale: [1.0, 1.0],
-                        fill: [0.2, 0.18, 0.16, 1.0],
-                        stroke: [0.12, 0.1, 0.08, 0.9],
+                        fill: Paint::Solid([0.2, 0.18, 0.16, 1.0]),
+                        stroke: Paint::Solid([0.12, 0.1, 0.08, 0.9]),
                         stroke_width: 1.5,
                     },
                     AnimObject {
@@ -539,12 +576,15 @@ pub fn generate_showcase_animation() -> Project {
                         position: [300.0, 702.0],
                         rotation: 0.0,
                         scale: [1.0, 1.0],
-                        fill: [1.0, 0.95, 0.5, light_alpha],
-                        stroke: [1.0, 0.9, 0.3, light_alpha * 0.6],
+                        fill: Paint::Solid([1.0, 0.95, 0.5, light_alpha]),
+                        stroke: Paint::Solid([1.0, 0.9, 0.3, light_alpha * 0.6]),
                         stroke_width: 3.0,
                     },
                 ],
                 tween,
+                label: String::new(),
+                comment: String::new(),
+                shape_tween: false,
             },
         );
     }
@@ -555,16 +595,19 @@ pub fn generate_showcase_animation() -> Project {
                 position: [0.0, 35.0],
                 control_in: Some([15.0, 32.0]),
                 control_out: Some([2.0, 15.0]),
+                pressure: 1.0,
             },
             PathPoint {
                 position: [0.0, -40.0],
                 control_in: Some([-2.0, -20.0]),
                 control_out: Some([25.0, -35.0]),
+                pressure: 1.0,
             },
             PathPoint {
                 position: [45.0, 10.0],
                 control_in: Some([40.0, -15.0]),
                 control_out: Some([35.0, 25.0]),
+                pressure: 1.0,
             },
         ],
         closed: true,
@@ -576,16 +619,19 @@ pub fn generate_showcase_animation() -> Project {
                 position: [-45.0, 0.0],
                 control_in: Some([-40.0, -3.0]),
                 control_out: Some([-30.0, 10.0]),
+                pressure: 1.0,
             },
             PathPoint {
                 position: [5.0, 15.0],
                 control_in: Some([-15.0, 14.0]),
                 control_out: Some([25.0, 14.0]),
+                pressure: 1.0,
             },
             PathPoint {
                 position: [45.0, 0.0],
                 control_in: Some([40.0, 8.0]),
                 control_out: Some([42.0, -3.0]),
+                pressure: 1.0,
             },
         ],
         closed: true,
@@ -626,8 +672,8 @@ pub fn generate_showcase_animation() -> Project {
                         position: [base_x, 828.0 + y_offset],
                         rotation,
                         scale: [1.0, 1.0],
-                        fill: hull_fill,
-                        stroke: hull_stroke,
+                        fill: Paint::Solid(hull_fill),
+                        stroke: Paint::Solid(hull_stroke),
                         stroke_width: 1.5,
                     },
                     AnimObject {
@@ -640,8 +686,8 @@ pub fn generate_showcase_animation() -> Project {
                         position: [base_x, 793.0 + y_offset],
                         rotation,
                         scale: [1.0, 1.0],
-                        fill: mast_fill,
-                        stroke: [0.0; 4],
+                        fill: Paint::Solid(mast_fill),
+                        stroke: Paint::Solid([0.0; 4]),
                         stroke_width: 0.0,
                     },
                     AnimObject {
@@ -650,12 +696,15 @@ pub fn generate_showcase_animation() -> Project {
                         position: [base_x + 5.0, 785.0 + y_offset],
                         rotation,
                         scale: [1.0, 1.0],
-                        fill: sail_fill,
-                        stroke: sail_stroke,
+                        fill: Paint::Solid(sail_fill),
+                        stroke: Paint::Solid(sail_stroke),
                         stroke_width: 1.5,
                     },
                 ],
                 tween,
+                label: String::new(),
+                comment: String::new(),
+                shape_tween: false,
             },
         );
     }
@@ -666,51 +715,61 @@ pub fn generate_showcase_animation() -> Project {
                 position: [-200.0, 0.0],
                 control_in: None,
                 control_out: Some([-100.0, -18.0]),
+                pressure: 1.0,
             },
             PathPoint {
                 position: [40.0, 0.0],
                 control_in: Some([-60.0, 18.0]),
                 control_out: Some([140.0, -18.0]),
+                pressure: 1.0,
             },
             PathPoint {
                 position: [280.0, 0.0],
                 control_in: Some([180.0, 18.0]),
                 control_out: Some([380.0, -18.0]),
+                pressure: 1.0,
             },
             PathPoint {
                 position: [520.0, 0.0],
                 control_in: Some([420.0, 18.0]),
                 control_out: Some([620.0, -18.0]),
+                pressure: 1.0,
             },
             PathPoint {
                 position: [760.0, 0.0],
                 control_in: Some([660.0, 18.0]),
                 control_out: Some([860.0, -18.0]),
+                pressure: 1.0,
             },
             PathPoint {
                 position: [1000.0, 0.0],
                 control_in: Some([900.0, 18.0]),
                 control_out: Some([1100.0, -18.0]),
+                pressure: 1.0,
             },
             PathPoint {
                 position: [1240.0, 0.0],
                 control_in: Some([1140.0, 18.0]),
                 control_out: Some([1340.0, -18.0]),
+                pressure: 1.0,
             },
             PathPoint {
                 position: [1480.0, 0.0],
                 control_in: Some([1380.0, 18.0]),
                 control_out: Some([1580.0, -18.0]),
+                pressure: 1.0,
             },
             PathPoint {
                 position: [1720.0, 0.0],
                 control_in: Some([1620.0, 18.0]),
                 control_out: Some([1820.0, -18.0]),
+                pressure: 1.0,
             },
             PathPoint {
                 position: [2100.0, 0.0],
                 control_in: Some([1960.0, 18.0]),
                 control_out: None,
+                pressure: 1.0,
             },
         ],
         closed: false,
@@ -827,8 +886,8 @@ pub fn generate_showcase_animation() -> Project {
                     position: star_positions[index],
                     rotation: 0.0,
                     scale,
-                    fill,
-                    stroke,
+                    fill: Paint::Solid(fill),
+                    stroke: Paint::Solid(stroke),
                     stroke_width,
                 })
                 .collect()
@@ -840,6 +899,9 @@ pub fn generate_showcase_animation() -> Project {
             Keyframe {
                 objects: make_stars([1.0, 1.0, 0.9, 0.0], [1.0, 1.0, 0.8, 0.0], 0.0, [0.1, 0.1]),
                 tween: TweenType::None,
+                label: String::new(),
+                comment: String::new(),
+                shape_tween: false,
             },
         ),
         (
@@ -847,6 +909,9 @@ pub fn generate_showcase_animation() -> Project {
             Keyframe {
                 objects: make_stars([1.0, 1.0, 0.9, 0.0], [1.0, 1.0, 0.8, 0.0], 0.0, [0.1, 0.1]),
                 tween: TweenType::EaseOut,
+                label: String::new(),
+                comment: String::new(),
+                shape_tween: false,
             },
         ),
         (
@@ -854,6 +919,9 @@ pub fn generate_showcase_animation() -> Project {
             Keyframe {
                 objects: make_stars([1.0, 1.0, 0.9, 0.9], [0.8, 0.85, 1.0, 0.4], 3.0, [1.0, 1.0]),
                 tween: TweenType::None,
+                label: String::new(),
+                comment: String::new(),
+                shape_tween: false,
             },
         ),
         (
@@ -861,6 +929,9 @@ pub fn generate_showcase_animation() -> Project {
             Keyframe {
                 objects: make_stars([1.0, 1.0, 0.9, 1.0], [0.8, 0.85, 1.0, 0.5], 4.0, [1.0, 1.0]),
                 tween: TweenType::None,
+                label: String::new(),
+                comment: String::new(),
+                shape_tween: false,
             },
         ),
     ]);
@@ -873,6 +944,11 @@ pub fn generate_showcase_animation() -> Project {
             locked: false,
             opacity,
             keyframes,
+            layer_type: LayerType::Normal,
+            blend_mode: BlendMode::Normal,
+            parent_id: None,
+            collapsed: false,
+            property_tracks: HashMap::new(),
         }
     };
 
@@ -895,6 +971,17 @@ pub fn generate_showcase_animation() -> Project {
             make_layer("Water", 0.85, water_keyframes),
             make_layer("Sky", 1.0, sky_keyframes),
         ],
+        guides: Vec::new(),
+        camera_keyframes: BTreeMap::new(),
+        camera_tween: TweenType::None,
+        scenes: Vec::new(),
+        active_scene: 0,
+        library: Library::default(),
+        image_assets: Vec::new(),
+        loop_start: None,
+        loop_end: None,
+        audio_tracks: Vec::new(),
+        armatures: Vec::new(),
     }
 }
 
@@ -925,11 +1012,14 @@ fn build_full_object_layer(
                     position: spec.position,
                     rotation: spec.rotation,
                     scale: spec.scale,
-                    fill: spec.fill,
-                    stroke: spec.stroke,
+                    fill: Paint::Solid(spec.fill),
+                    stroke: Paint::Solid(spec.stroke),
                     stroke_width: spec.stroke_width,
                 }],
                 tween: spec.tween,
+                label: String::new(),
+                comment: String::new(),
+                shape_tween: false,
             },
         );
     }

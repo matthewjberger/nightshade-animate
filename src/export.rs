@@ -1,6 +1,10 @@
+use std::sync::OnceLock;
+
 use nightshade::prelude::*;
 
-use crate::project::{AnimObject, PathPoint, Project, Shape};
+use crate::camera;
+use crate::paint::Paint;
+use crate::project::{AnimObject, BlendMode, LayerType, PathPoint, Project, Shape};
 use crate::tween;
 
 pub fn export_gif(project: &Project, path: &std::path::Path) {
@@ -38,6 +42,82 @@ pub fn export_png_sequence(project: &Project, folder: &std::path::Path) {
     }
 }
 
+pub enum VideoFormat {
+    Mp4,
+    WebM,
+}
+
+pub fn export_video(
+    project: &Project,
+    path: &std::path::Path,
+    format: VideoFormat,
+) -> Result<(), String> {
+    let temp_dir = std::env::temp_dir().join(format!("framekey_export_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir)
+        .map_err(|error| format!("Failed to create temp directory: {}", error))?;
+
+    for frame in 0..project.total_frames {
+        let image = rasterize_frame(project, frame);
+        let filename = format!("frame_{:05}.png", frame);
+        let frame_path = temp_dir.join(&filename);
+        image
+            .save(&frame_path)
+            .map_err(|error| format!("Failed to save frame {}: {}", frame, error))?;
+    }
+
+    let input_pattern = temp_dir.join("frame_%05d.png");
+    let input_pattern_str = input_pattern.to_string_lossy().to_string();
+    let output_str = path.to_string_lossy().to_string();
+
+    let mut command = std::process::Command::new("ffmpeg");
+    command
+        .arg("-y")
+        .arg("-framerate")
+        .arg(project.frame_rate.to_string())
+        .arg("-i")
+        .arg(&input_pattern_str);
+
+    match format {
+        VideoFormat::Mp4 => {
+            command
+                .arg("-c:v")
+                .arg("libx264")
+                .arg("-pix_fmt")
+                .arg("yuv420p")
+                .arg("-crf")
+                .arg("18")
+                .arg("-preset")
+                .arg("medium");
+        }
+        VideoFormat::WebM => {
+            command
+                .arg("-c:v")
+                .arg("libvpx-vp9")
+                .arg("-crf")
+                .arg("30")
+                .arg("-b:v")
+                .arg("0")
+                .arg("-pix_fmt")
+                .arg("yuva420p");
+        }
+    }
+
+    command.arg(&output_str);
+
+    let output = command
+        .output()
+        .map_err(|error| format!("Failed to run ffmpeg (is it installed?): {}", error))?;
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ffmpeg failed: {}", stderr));
+    }
+
+    Ok(())
+}
+
 pub fn export_sprite_sheet(project: &Project, path: &std::path::Path) {
     let columns = (project.total_frames as f64).sqrt().ceil() as u32;
     let rows = project.total_frames.div_ceil(columns);
@@ -65,9 +145,27 @@ pub fn export_sprite_sheet(project: &Project, path: &std::path::Path) {
     let _ = sheet.save(path);
 }
 
+fn apply_camera_to_object(
+    object: &AnimObject,
+    cam: &camera::ResolvedCamera,
+    canvas_width: f32,
+    canvas_height: f32,
+) -> AnimObject {
+    let mut transformed = object.clone();
+    let new_pos = camera::transform_point(object.position, cam, canvas_width, canvas_height);
+    transformed.position = new_pos;
+    transformed.rotation += cam.rotation;
+    transformed.scale[0] *= cam.zoom;
+    transformed.scale[1] *= cam.zoom;
+    transformed
+}
+
 fn rasterize_frame(project: &Project, frame: u32) -> image::RgbaImage {
     let width = project.canvas_width;
     let height = project.canvas_height;
+
+    let cam = camera::resolve_camera(project, frame);
+    let has_camera = !project.camera_keyframes.is_empty();
 
     let bg = project.background_color;
     let bg_pixel = image::Rgba([
@@ -85,10 +183,105 @@ fn rasterize_frame(project: &Project, frame: u32) -> image::RgbaImage {
         if !layer.visible {
             continue;
         }
+        if layer.layer_type == LayerType::Guide || layer.layer_type == LayerType::Folder {
+            continue;
+        }
+        if layer.layer_type == LayerType::Mask {
+            continue;
+        }
 
-        if let Some(objects) = tween::resolve_frame(layer, frame) {
+        let is_masked = layer_index > 0 && {
+            let above = &project.layers[layer_index - 1];
+            above.layer_type == LayerType::Mask && above.visible
+        };
+
+        if is_masked {
+            let mask_layer = &project.layers[layer_index - 1];
+
+            let mut layer_buffer: image::RgbaImage =
+                image::ImageBuffer::from_pixel(width, height, image::Rgba([0, 0, 0, 0]));
+            if let Some(objects) = tween::resolve_frame(layer, frame) {
+                for object in &objects {
+                    let render_obj = if has_camera {
+                        apply_camera_to_object(object, &cam, width as f32, height as f32)
+                    } else {
+                        object.clone()
+                    };
+                    rasterize_object_with_assets(
+                        &mut layer_buffer,
+                        &render_obj,
+                        layer.opacity,
+                        &project.image_assets,
+                    );
+                }
+            }
+
+            let mut mask_buffer: image::RgbaImage =
+                image::ImageBuffer::from_pixel(width, height, image::Rgba([0, 0, 0, 0]));
+            if let Some(objects) = tween::resolve_frame(mask_layer, frame) {
+                for object in &objects {
+                    let render_obj = if has_camera {
+                        apply_camera_to_object(object, &cam, width as f32, height as f32)
+                    } else {
+                        object.clone()
+                    };
+                    rasterize_object_with_assets(
+                        &mut mask_buffer,
+                        &render_obj,
+                        mask_layer.opacity,
+                        &project.image_assets,
+                    );
+                }
+            }
+
+            for y in 0..height {
+                for x in 0..width {
+                    let layer_pixel = layer_buffer.get_pixel(x, y);
+                    let mask_pixel = mask_buffer.get_pixel(x, y);
+                    let mask_alpha = mask_pixel[3] as f32 / 255.0;
+                    let result = image::Rgba([
+                        layer_pixel[0],
+                        layer_pixel[1],
+                        layer_pixel[2],
+                        (layer_pixel[3] as f32 * mask_alpha) as u8,
+                    ]);
+                    layer_buffer.put_pixel(x, y, result);
+                }
+            }
+
+            composite_layer(&mut image_buffer, &layer_buffer, layer.blend_mode);
+        } else if layer.blend_mode != BlendMode::Normal {
+            let mut layer_buffer: image::RgbaImage =
+                image::ImageBuffer::from_pixel(width, height, image::Rgba([0, 0, 0, 0]));
+            if let Some(objects) = tween::resolve_frame(layer, frame) {
+                for object in &objects {
+                    let render_obj = if has_camera {
+                        apply_camera_to_object(object, &cam, width as f32, height as f32)
+                    } else {
+                        object.clone()
+                    };
+                    rasterize_object_with_assets(
+                        &mut layer_buffer,
+                        &render_obj,
+                        layer.opacity,
+                        &project.image_assets,
+                    );
+                }
+            }
+            composite_layer(&mut image_buffer, &layer_buffer, layer.blend_mode);
+        } else if let Some(objects) = tween::resolve_frame(layer, frame) {
             for object in &objects {
-                rasterize_object(&mut image_buffer, object, layer.opacity);
+                let render_obj = if has_camera {
+                    apply_camera_to_object(object, &cam, width as f32, height as f32)
+                } else {
+                    object.clone()
+                };
+                rasterize_object_with_assets(
+                    &mut image_buffer,
+                    &render_obj,
+                    layer.opacity,
+                    &project.image_assets,
+                );
             }
         }
     }
@@ -96,8 +289,123 @@ fn rasterize_frame(project: &Project, frame: u32) -> image::RgbaImage {
     image_buffer
 }
 
-fn rasterize_object(image_buffer: &mut image::RgbaImage, object: &AnimObject, layer_opacity: f32) {
+fn composite_layer(dst: &mut image::RgbaImage, src: &image::RgbaImage, blend_mode: BlendMode) {
+    let (width, height) = dst.dimensions();
+    for y in 0..height {
+        for x in 0..width {
+            let src_pixel = src.get_pixel(x, y);
+            if src_pixel[3] == 0 {
+                continue;
+            }
+            let dst_pixel = *dst.get_pixel(x, y);
+            let blended = blend_pixel_with_mode(&dst_pixel, src_pixel, blend_mode);
+            dst.put_pixel(x, y, blended);
+        }
+    }
+}
+
+fn blend_pixel_with_mode(
+    dst: &image::Rgba<u8>,
+    src: &image::Rgba<u8>,
+    blend_mode: BlendMode,
+) -> image::Rgba<u8> {
+    let src_a = src[3] as f32 / 255.0;
+    let dst_a = dst[3] as f32 / 255.0;
+
+    if src_a < 0.001 {
+        return *dst;
+    }
+
+    let src_r = src[0] as f32 / 255.0;
+    let src_g = src[1] as f32 / 255.0;
+    let src_b = src[2] as f32 / 255.0;
+    let dst_r = dst[0] as f32 / 255.0;
+    let dst_g = dst[1] as f32 / 255.0;
+    let dst_b = dst[2] as f32 / 255.0;
+
+    let (blended_r, blended_g, blended_b) = match blend_mode {
+        BlendMode::Normal => (src_r, src_g, src_b),
+        BlendMode::Multiply => (src_r * dst_r, src_g * dst_g, src_b * dst_b),
+        BlendMode::Screen => (
+            1.0 - (1.0 - src_r) * (1.0 - dst_r),
+            1.0 - (1.0 - src_g) * (1.0 - dst_g),
+            1.0 - (1.0 - src_b) * (1.0 - dst_b),
+        ),
+        BlendMode::Overlay => (
+            overlay_channel(dst_r, src_r),
+            overlay_channel(dst_g, src_g),
+            overlay_channel(dst_b, src_b),
+        ),
+        BlendMode::Darken => (src_r.min(dst_r), src_g.min(dst_g), src_b.min(dst_b)),
+        BlendMode::Lighten => (src_r.max(dst_r), src_g.max(dst_g), src_b.max(dst_b)),
+        BlendMode::ColorDodge => (
+            color_dodge_channel(dst_r, src_r),
+            color_dodge_channel(dst_g, src_g),
+            color_dodge_channel(dst_b, src_b),
+        ),
+        BlendMode::ColorBurn => (
+            color_burn_channel(dst_r, src_r),
+            color_burn_channel(dst_g, src_g),
+            color_burn_channel(dst_b, src_b),
+        ),
+        BlendMode::Difference => (
+            (src_r - dst_r).abs(),
+            (src_g - dst_g).abs(),
+            (src_b - dst_b).abs(),
+        ),
+        BlendMode::Exclusion => (
+            src_r + dst_r - 2.0 * src_r * dst_r,
+            src_g + dst_g - 2.0 * src_g * dst_g,
+            src_b + dst_b - 2.0 * src_b * dst_b,
+        ),
+    };
+
+    let result_r = blended_r * src_a + dst_r * (1.0 - src_a);
+    let result_g = blended_g * src_a + dst_g * (1.0 - src_a);
+    let result_b = blended_b * src_a + dst_b * (1.0 - src_a);
+    let result_a = src_a + dst_a * (1.0 - src_a);
+
+    image::Rgba([
+        (result_r * 255.0).clamp(0.0, 255.0) as u8,
+        (result_g * 255.0).clamp(0.0, 255.0) as u8,
+        (result_b * 255.0).clamp(0.0, 255.0) as u8,
+        (result_a * 255.0).clamp(0.0, 255.0) as u8,
+    ])
+}
+
+fn overlay_channel(dst: f32, src: f32) -> f32 {
+    if dst < 0.5 {
+        2.0 * src * dst
+    } else {
+        1.0 - 2.0 * (1.0 - src) * (1.0 - dst)
+    }
+}
+
+fn color_dodge_channel(dst: f32, src: f32) -> f32 {
+    if src >= 1.0 {
+        1.0
+    } else {
+        (dst / (1.0 - src)).min(1.0)
+    }
+}
+
+fn color_burn_channel(dst: f32, src: f32) -> f32 {
+    if src <= 0.0 {
+        0.0
+    } else {
+        1.0 - ((1.0 - dst) / src).min(1.0)
+    }
+}
+
+fn rasterize_object_with_assets(
+    image_buffer: &mut image::RgbaImage,
+    object: &AnimObject,
+    layer_opacity: f32,
+    image_assets: &[crate::project::ImageAsset],
+) {
     let (width, height) = image_buffer.dimensions();
+    let fill = sample_paint_solid(&object.fill);
+    let stroke = sample_paint_solid(&object.stroke);
 
     match &object.shape {
         Shape::Rectangle {
@@ -148,9 +456,21 @@ fn rasterize_object(image_buffer: &mut image::RgbaImage, object: &AnimObject, la
                         };
 
                         let color = if inner_dist > 0.0 {
-                            object.stroke
+                            sample_paint_at_local(
+                                &object.stroke,
+                                unrotated_x,
+                                unrotated_y,
+                                half_w,
+                                half_h,
+                            )
                         } else {
-                            object.fill
+                            sample_paint_at_local(
+                                &object.fill,
+                                unrotated_x,
+                                unrotated_y,
+                                half_w,
+                                half_h,
+                            )
                         };
 
                         blend_pixel(image_buffer, x, y, color, layer_opacity);
@@ -162,18 +482,13 @@ fn rasterize_object(image_buffer: &mut image::RgbaImage, object: &AnimObject, la
             let scaled_rx = radius_x * object.scale[0];
             let scaled_ry = radius_y * object.scale[1];
             let max_radius = scaled_rx.max(scaled_ry);
-            let bound = if object.rotation.abs() > 0.001 {
-                max_radius
-            } else {
-                0.0
-            };
             let bound_x = if object.rotation.abs() > 0.001 {
-                bound
+                max_radius
             } else {
                 scaled_rx
             };
             let bound_y = if object.rotation.abs() > 0.001 {
-                bound
+                max_radius
             } else {
                 scaled_ry
             };
@@ -208,9 +523,21 @@ fn rasterize_object(image_buffer: &mut image::RgbaImage, object: &AnimObject, la
                             };
 
                             let color = if inner_dist > 1.0 && object.stroke_width > 0.0 {
-                                object.stroke
+                                sample_paint_at_local(
+                                    &object.stroke,
+                                    unrotated_x,
+                                    unrotated_y,
+                                    scaled_rx,
+                                    scaled_ry,
+                                )
                             } else {
-                                object.fill
+                                sample_paint_at_local(
+                                    &object.fill,
+                                    unrotated_x,
+                                    unrotated_y,
+                                    scaled_rx,
+                                    scaled_ry,
+                                )
                             };
 
                             blend_pixel(image_buffer, x, y, color, layer_opacity);
@@ -250,7 +577,7 @@ fn rasterize_object(image_buffer: &mut image::RgbaImage, object: &AnimObject, la
                     let dist = ((px - closest_x).powi(2) + (py - closest_y).powi(2)).sqrt();
 
                     if dist <= thickness / 2.0 {
-                        blend_pixel(image_buffer, x, y, object.stroke, layer_opacity);
+                        blend_pixel(image_buffer, x, y, stroke, layer_opacity);
                     }
                 }
             }
@@ -260,14 +587,23 @@ fn rasterize_object(image_buffer: &mut image::RgbaImage, object: &AnimObject, la
                 return;
             }
 
+            let has_variable_pressure = points
+                .iter()
+                .any(|point| (point.pressure - 1.0).abs() > 0.01);
+
+            if has_variable_pressure && !*closed {
+                rasterize_variable_width_path(image_buffer, object, points, layer_opacity);
+                return;
+            }
+
             let canvas_points = build_path_points(object, points, *closed);
 
             if *closed && canvas_points.len() >= 3 {
                 rasterize_closed_path(
                     image_buffer,
                     &canvas_points,
-                    object.fill,
-                    object.stroke,
+                    fill,
+                    stroke,
                     object.stroke_width,
                     layer_opacity,
                 );
@@ -275,13 +611,260 @@ fn rasterize_object(image_buffer: &mut image::RgbaImage, object: &AnimObject, la
                 rasterize_open_path(
                     image_buffer,
                     &canvas_points,
-                    object.stroke,
+                    stroke,
                     object.stroke_width,
                     layer_opacity,
                 );
             }
         }
+        Shape::Text {
+            content, font_size, ..
+        } => {
+            rasterize_text(image_buffer, object, content, *font_size, layer_opacity);
+        }
+        Shape::RasterImage {
+            image_id,
+            display_width,
+            display_height,
+            ..
+        } => {
+            let Some(asset) = image_assets.iter().find(|asset| asset.id == *image_id) else {
+                return;
+            };
+            let Ok(source_image) = image::load_from_memory(&asset.data) else {
+                return;
+            };
+            let scaled = image::imageops::resize(
+                &source_image.to_rgba8(),
+                (display_width * object.scale[0]) as u32,
+                (display_height * object.scale[1]) as u32,
+                image::imageops::FilterType::Lanczos3,
+            );
+            let (scaled_w, scaled_h) = scaled.dimensions();
+            let half_w = scaled_w as f32 / 2.0;
+            let half_h = scaled_h as f32 / 2.0;
+            let origin_x = object.position[0] - half_w;
+            let origin_y = object.position[1] - half_h;
+
+            for src_y in 0..scaled_h {
+                for src_x in 0..scaled_w {
+                    let dst_x = (origin_x + src_x as f32) as i32;
+                    let dst_y = (origin_y + src_y as f32) as i32;
+                    if dst_x >= 0 && dst_y >= 0 && (dst_x as u32) < width && (dst_y as u32) < height
+                    {
+                        let src_pixel = scaled.get_pixel(src_x, src_y);
+                        let color = [
+                            src_pixel[0] as f32 / 255.0,
+                            src_pixel[1] as f32 / 255.0,
+                            src_pixel[2] as f32 / 255.0,
+                            src_pixel[3] as f32 / 255.0,
+                        ];
+                        blend_pixel(
+                            image_buffer,
+                            dst_x as u32,
+                            dst_y as u32,
+                            color,
+                            layer_opacity,
+                        );
+                    }
+                }
+            }
+        }
+        Shape::SymbolInstance { .. } => {}
     }
+}
+
+fn sample_paint_solid(paint: &Paint) -> [f32; 4] {
+    paint.as_solid()
+}
+
+fn sample_paint_at_local(
+    paint: &Paint,
+    local_x: f32,
+    local_y: f32,
+    half_w: f32,
+    half_h: f32,
+) -> [f32; 4] {
+    match paint {
+        Paint::Solid(color) => *color,
+        Paint::LinearGradient { start, end, .. } => {
+            let dx = end[0] - start[0];
+            let dy = end[1] - start[1];
+            let len_sq = dx * dx + dy * dy;
+            if len_sq < 0.001 {
+                return paint.as_solid();
+            }
+            let norm_x = if half_w > 0.001 {
+                (local_x / half_w + 1.0) / 2.0
+            } else {
+                0.5
+            };
+            let norm_y = if half_h > 0.001 {
+                (local_y / half_h + 1.0) / 2.0
+            } else {
+                0.5
+            };
+            let px = norm_x - start[0];
+            let py = norm_y - start[1];
+            let t = ((px * dx + py * dy) / len_sq).clamp(0.0, 1.0);
+            paint.sample_at(t)
+        }
+        Paint::RadialGradient { center, radius, .. } => {
+            let norm_x = if half_w > 0.001 {
+                (local_x / half_w + 1.0) / 2.0
+            } else {
+                0.5
+            };
+            let norm_y = if half_h > 0.001 {
+                (local_y / half_h + 1.0) / 2.0
+            } else {
+                0.5
+            };
+            let dx = norm_x - center[0];
+            let dy = norm_y - center[1];
+            let dist = (dx * dx + dy * dy).sqrt();
+            let t = if *radius > 0.001 {
+                (dist / radius).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            paint.sample_at(t)
+        }
+    }
+}
+
+fn rasterize_variable_width_path(
+    image_buffer: &mut image::RgbaImage,
+    object: &AnimObject,
+    points: &[PathPoint],
+    layer_opacity: f32,
+) {
+    let stroke_color = object.stroke.as_solid();
+    if stroke_color[3] < 0.001 {
+        return;
+    }
+
+    let (img_w, img_h) = image_buffer.dimensions();
+
+    for index in 1..points.len() {
+        let prev = &points[index - 1];
+        let curr = &points[index];
+
+        let ax = object.position[0] + prev.position[0] * object.scale[0];
+        let ay = object.position[1] + prev.position[1] * object.scale[1];
+        let bx = object.position[0] + curr.position[0] * object.scale[0];
+        let by = object.position[1] + curr.position[1] * object.scale[1];
+
+        let avg_pressure = (prev.pressure + curr.pressure) / 2.0;
+        let half_thick = (object.stroke_width * avg_pressure / 2.0).max(0.25);
+
+        let seg_min_x = ((ax.min(bx) - half_thick).floor() as i32).max(0) as u32;
+        let seg_min_y = ((ay.min(by) - half_thick).floor() as i32).max(0) as u32;
+        let seg_max_x = ((ax.max(bx) + half_thick).ceil() as u32).min(img_w - 1);
+        let seg_max_y = ((ay.max(by) + half_thick).ceil() as u32).min(img_h - 1);
+
+        let dx = bx - ax;
+        let dy = by - ay;
+        let len_sq = dx * dx + dy * dy;
+        if len_sq < 0.001 {
+            continue;
+        }
+
+        for y in seg_min_y..=seg_max_y {
+            for x in seg_min_x..=seg_max_x {
+                let px = x as f32 + 0.5 - ax;
+                let py = y as f32 + 0.5 - ay;
+                let t = ((px * dx + py * dy) / len_sq).clamp(0.0, 1.0);
+                let cx = t * dx;
+                let cy = t * dy;
+                let dist = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
+
+                let interp_pressure = prev.pressure + (curr.pressure - prev.pressure) * t;
+                let local_half_thick = (object.stroke_width * interp_pressure / 2.0).max(0.25);
+
+                if dist <= local_half_thick {
+                    blend_pixel(image_buffer, x, y, stroke_color, layer_opacity);
+                }
+            }
+        }
+    }
+}
+
+fn rasterize_text(
+    image_buffer: &mut image::RgbaImage,
+    object: &AnimObject,
+    content: &str,
+    font_size: f32,
+    layer_opacity: f32,
+) {
+    use ab_glyph::{Font, ScaleFont};
+
+    let font = match get_system_font() {
+        Some(font) => font,
+        None => return,
+    };
+
+    let scale = ab_glyph::PxScale::from(font_size * object.scale[1]);
+    let scaled_font = font.as_scaled(scale);
+
+    let fill = object.fill.as_solid();
+    let base_x = object.position[0];
+    let mut cursor_x = base_x;
+    let cursor_y = object.position[1] + scaled_font.ascent();
+
+    for ch in content.chars() {
+        let glyph_id = scaled_font.glyph_id(ch);
+        let glyph = glyph_id.with_scale_and_position(scale, ab_glyph::point(cursor_x, cursor_y));
+
+        if let Some(outlined) = font.outline_glyph(glyph) {
+            let bounds = outlined.px_bounds();
+            outlined.draw(|px, py, coverage| {
+                let abs_x = bounds.min.x as i32 + px as i32;
+                let abs_y = bounds.min.y as i32 + py as i32;
+                if abs_x >= 0
+                    && abs_y >= 0
+                    && (abs_x as u32) < image_buffer.width()
+                    && (abs_y as u32) < image_buffer.height()
+                {
+                    let color = [fill[0], fill[1], fill[2], fill[3] * coverage];
+                    blend_pixel(
+                        image_buffer,
+                        abs_x as u32,
+                        abs_y as u32,
+                        color,
+                        layer_opacity,
+                    );
+                }
+            });
+        }
+
+        cursor_x += scaled_font.h_advance(glyph_id);
+    }
+}
+
+fn get_system_font() -> Option<&'static ab_glyph::FontArc> {
+    static FONT: OnceLock<Option<ab_glyph::FontArc>> = OnceLock::new();
+    FONT.get_or_init(|| {
+        let font_paths = [
+            "C:\\Windows\\Fonts\\arial.ttf",
+            "C:\\Windows\\Fonts\\segoeui.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/SFPro.ttf",
+        ];
+
+        for path in &font_paths {
+            if let Ok(data) = std::fs::read(path)
+                && let Ok(font) = ab_glyph::FontArc::try_from_vec(data)
+            {
+                return Some(font);
+            }
+        }
+
+        None
+    })
+    .as_ref()
 }
 
 fn blend_pixel(

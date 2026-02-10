@@ -33,7 +33,14 @@ pub fn advance_playback(app: &mut AnimateApp) {
         while app.playback.accumulator >= frame_duration {
             app.playback.accumulator -= frame_duration;
             app.current_frame += 1;
-            if app.current_frame >= app.project.total_frames {
+
+            if let (Some(loop_start), Some(loop_end)) =
+                (app.project.loop_start, app.project.loop_end)
+            {
+                if app.current_frame > loop_end {
+                    app.current_frame = loop_start;
+                }
+            } else if app.current_frame >= app.project.total_frames {
                 app.current_frame = 0;
             }
         }
@@ -47,6 +54,8 @@ pub fn toggle_playback(app: &mut AnimateApp) {
         app.playback.last_instant = None;
         app.playback.accumulator = 0.0;
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::audio::sync_playback_state(app.playback.playing, app);
 }
 
 pub fn handle_playback_shortcuts(app: &mut AnimateApp, ui_context: &egui::Context) {
